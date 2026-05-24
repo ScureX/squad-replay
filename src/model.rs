@@ -117,6 +117,12 @@ pub struct Player {
     pub squad_creator_steam_id: Option<String>,
     pub squad_creator_eos_id: Option<String>,
     pub start_time_ms: Option<u64>,
+    /// Time when player connected (from log)
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub connect_time_ms: Option<u64>,
+    /// Time when player disconnected (from log)
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub disconnect_time_ms: Option<u64>,
     /// Time windows when the player was visible (possessing a pawn).
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub visibility_windows: Vec<VisibilityWindow>,
@@ -590,15 +596,10 @@ pub struct CompatMatch {
 }
 
 /// Options controlling replay parsing behavior.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Default)]
 pub struct ParseOptions {
+    /// Include raw property change events in output
     pub include_property_events: bool,
-}
-
-impl Default for ParseOptions {
-    fn default() -> Self {
-        Self {
-            include_property_events: true,
-        }
-    }
+    /// Path to SquadGame.log for event merging
+    pub log_path: Option<std::path::PathBuf>,
 }

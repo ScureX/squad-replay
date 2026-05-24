@@ -64,6 +64,8 @@ mod classify;
 pub mod compat;
 mod error;
 mod formats;
+/// Parser for Squad game log files (SquadGame.log).
+pub mod log_parser;
 mod parser;
 /// Read and write `.sqrb` (binary MessagePack) bundles.
 pub mod sqrb;
@@ -76,7 +78,23 @@ pub use error::{Error, Result};
 
 /// Parse a replay file from disk.
 pub fn parse_file(path: impl AsRef<Path>, options: &ParseOptions) -> Result<Bundle> {
-    parser::parse_file(path, options.include_property_events)
+    let mut bundle = parser::parse_file(&path, options.include_property_events)?;
+    
+    // Merge log data if provided
+    if let Some(log_path) = &options.log_path {
+        if log_path.exists() {
+            if let Ok(log_matches) = log_parser::parse_log_file(log_path) {
+                let replay_map = bundle.replay.map_name.as_deref().unwrap_or("");
+                let replay_duration = bundle.replay.duration_ms;
+                
+                if let Some(log_match) = log_parser::find_matching_log(&log_matches, replay_map, replay_duration) {
+                    log_parser::merge_log_into_players(&mut bundle.players, log_match, replay_duration);
+                }
+            }
+        }
+    }
+    
+    Ok(bundle)
 }
 
 /// Parse replay bytes that are already loaded in memory.
@@ -85,7 +103,23 @@ pub fn parse_bytes(
     file_name: Option<String>,
     options: &ParseOptions,
 ) -> Result<Bundle> {
-    parser::parse_bytes(bytes.as_ref(), file_name, options.include_property_events)
+    let mut bundle = parser::parse_bytes(bytes.as_ref(), file_name, options.include_property_events)?;
+    
+    // Merge log data if provided
+    if let Some(log_path) = &options.log_path {
+        if log_path.exists() {
+            if let Ok(log_matches) = log_parser::parse_log_file(log_path) {
+                let replay_map = bundle.replay.map_name.as_deref().unwrap_or("");
+                let replay_duration = bundle.replay.duration_ms;
+                
+                if let Some(log_match) = log_parser::find_matching_log(&log_matches, replay_map, replay_duration) {
+                    log_parser::merge_log_into_players(&mut bundle.players, log_match, replay_duration);
+                }
+            }
+        }
+    }
+    
+    Ok(bundle)
 }
 
 /// Read a serialized bundle from disk.

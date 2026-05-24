@@ -39,6 +39,7 @@ strip = false
 split-debuginfo = "packed"
 
 [dependencies]
+chrono = "0.4"
 clap = { version = "4.5", features = ["derive"], optional = true }
 crc32fast = "1.4"
 rayon = "1.10"

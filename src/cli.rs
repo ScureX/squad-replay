@@ -67,6 +67,13 @@ enum Command {
         input: PathBuf,
         #[arg(
             long,
+            short = 'l',
+            value_name = "LOG",
+            help = "Path to SquadGame.log for event merging (connect/disconnect, spawns, deaths)"
+        )]
+        log: Option<PathBuf>,
+        #[arg(
+            long,
             short = 'f',
             default_value = "sqrj",
             value_name = "FORMATS",
@@ -438,6 +445,7 @@ pub fn run() -> Result<()> {
     match cli.command {
         Command::Parse {
             input,
+            log,
             format,
             output,
             compat_json,
@@ -447,6 +455,7 @@ pub fn run() -> Result<()> {
             let output_base = output.unwrap_or_else(|| default_output_base(&input));
             let options = ParseOptions {
                 include_property_events: !no_properties,
+                log_path: log,
             };
             let bundle = parse_file(&input, &options)?;
             let written = write_outputs(&bundle, &formats, &output_base, compat_json)?;
@@ -467,6 +476,7 @@ pub fn run() -> Result<()> {
         } => {
             let options = ParseOptions {
                 include_property_events: !no_properties,
+                log_path: None,
             };
             let bundle = parse_file(&input, &options)?;
             let input_display = path_text(&input);

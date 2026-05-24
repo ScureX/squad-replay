@@ -5125,6 +5125,8 @@ fn parse_data(
                 squad_creator_steam_id: None,
                 squad_creator_eos_id: None,
                 start_time_ms: builder.start_time_ms,
+                connect_time_ms: None,
+                disconnect_time_ms: None,
                 visibility_windows,
                 notes: builder.notes,
             }
