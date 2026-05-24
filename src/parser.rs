@@ -317,6 +317,13 @@ struct ParseState {
     packets_processed: u64,
     actor_opens: u64,
     property_replications: u64,
+    skipped_actorless_bunches: u64,
+    skipped_actorless_channels: HashSet<u32>,
+    fingerprint_too_few_handles: u64,
+    fingerprint_no_candidates: u64,
+    fingerprint_ambiguous: u64,
+    // Accumulate handles seen per channel for progressive fingerprinting
+    channel_accumulated_handles: HashMap<u32, HashSet<u16>>,
     warnings: Vec<String>,
     game_state: GameStateTemp,
 }
@@ -2979,12 +2986,41 @@ fn apply_property_event(
     {
         if let Some(movement) = &decoded.rep_movement {
             if let Some(location) = movement.location {
-                let key = actor_guid
-                    .map(|guid| format!("{}_{guid}", context.group_leaf))
-                    .unwrap_or_else(|| context.group_leaf.to_string());
+                // Use actor_guid if available, otherwise fall back to channel_index
+                // to uniquely identify vehicles that existed before recording started.
+                let effective_guid = actor_guid.unwrap_or(context.channel_index);
+                let key = format!("{}_{effective_guid}", context.group_leaf);
+                
+                // Create an actor builder entry for vehicles without opened actors.
+                // This ensures they appear in the output even if never formally opened.
+                if actor_guid.is_none() {
+                    state
+                        .actor_builders
+                        .entry(effective_guid)
+                        .or_insert_with(|| ActorBuilder {
+                            actor_guid: effective_guid,
+                            channel_index: context.channel_index,
+                            class_name: Some(context.group_leaf.to_string()),
+                            archetype_path: Some(context.group_path.to_string()),
+                            open_time_ms: context.t_ms,
+                            close_time_ms: None,
+                            initial_location: Some(Vec3 {
+                                x: location.x,
+                                y: location.y,
+                                z: location.z,
+                            }),
+                            initial_rotation: movement.rotation,
+                            team: None,
+                            build_state: None,
+                            health: None,
+                            owner: None,
+                            notes: vec!["synthetic_from_channel".to_string()],
+                        });
+                }
+                
                 state.raw_vehicle_samples.push(RawSample {
                     t_ms: context.t_ms,
-                    actor_guid,
+                    actor_guid: Some(effective_guid),
                     player_state_guid: None,
                     key: Some(key),
                     class_name: Some(context.group_leaf.to_string()),
@@ -3663,7 +3699,7 @@ fn process_bunch(bunch: &mut Bunch, state: &mut ParseState) {
                 if h == 0 {
                     break;
                 }
-                let h = h - 1;
+                let h = (h - 1) as u16;
                 // Skip the payload bits for this property.  Bound against
                 // the bits actually remaining so a corrupted/mismatched
                 // payload can't push the cursor past `last_bit` and force
@@ -3680,23 +3716,49 @@ fn process_bunch(bunch: &mut Bunch, state: &mut ParseState) {
             bunch.archive.set_abs_bit_pos(saved_pos);
             bunch.archive.is_error = saved_error;
 
+            // Accumulate handles seen on this channel across bunches.
+            // This helps resolve actor-less channels that only send one
+            // property at a time (e.g., pre-existing vehicles sending
+            // only ReplicatedMovement updates).
+            let ch = bunch.ch_index;
+            let accumulated = state.channel_accumulated_handles.entry(ch).or_default();
+            for &h in &handles {
+                accumulated.insert(h);
+            }
+
+            // Use accumulated handles if current bunch has too few
+            let handles_for_match: Vec<u32> = if handles.len() < 2 && accumulated.len() >= 2 {
+                accumulated.iter().copied().map(|h| h as u32).collect()
+            } else {
+                handles.iter().map(|&h| h as u32).collect()
+            };
+
             // A single handle is too ambiguous to safely fingerprint a
             // group — many classes share their first replicated handle.
             // Require at least two distinct handles before committing.
-            if handles.len() < 2 {
+            if handles_for_match.len() < 2 {
+                state.fingerprint_too_few_handles += 1;
                 return None;
             }
 
             // Find export groups that contain ALL peeked handles.
+            // For vehicle groups (which may have fewer exports), use a lower
+            // threshold to improve detection of pre-existing vehicles.
             let mut candidates: Vec<_> = state
                 .groups_by_path
                 .values()
                 .filter(|g| {
-                    g.net_field_exports_length > 5
-                        && handles.iter().all(|h| g.net_field_exports.contains_key(h))
+                    let is_vehicle = g.classify_flags.is_vehicle();
+                    let min_exports = if is_vehicle { 1 } else { 5 };
+                    g.net_field_exports_length > min_exports
+                        && handles_for_match.iter().all(|h| g.net_field_exports.contains_key(h))
                 })
                 .collect();
 
+            if candidates.is_empty() {
+                state.fingerprint_no_candidates += 1;
+                return None;
+            }
             if candidates.len() == 1 {
                 return Some(Arc::clone(candidates[0]));
             }
@@ -3711,6 +3773,13 @@ fn process_bunch(bunch: &mut Bunch, state: &mut ParseState) {
                 if best.net_field_exports.len() > second.net_field_exports.len() {
                     return Some(Arc::clone(best));
                 }
+                // For pre-existing vehicles (actor-less channels), prefer capturing
+                // movement data even if ambiguous. Pick the first vehicle candidate
+                // rather than losing all data by returning None.
+                if actor.is_none() && best.classify_flags.is_vehicle() {
+                    return Some(Arc::clone(best));
+                }
+                state.fingerprint_ambiguous += 1;
             }
             None
         });
@@ -3737,6 +3806,11 @@ fn process_bunch(bunch: &mut Bunch, state: &mut ParseState) {
                 );
             }
         } else {
+            // Track skipped bunches for diagnostics
+            if actor.is_none() {
+                state.skipped_actorless_bunches += 1;
+                state.skipped_actorless_channels.insert(bunch.ch_index);
+            }
             bunch.archive.skip_bits(num_payload_bits);
         }
 
@@ -5047,6 +5121,28 @@ fn parse_data(
 
     string_inventory.class_paths.sort();
     string_inventory.ids.sort();
+
+    // Report skipped actorless bunches as diagnostic
+    if state.skipped_actorless_bunches > 0 {
+        let mut channels: Vec<_> = state.skipped_actorless_channels.iter().copied().collect();
+        channels.sort();
+        state.warnings.push(format!(
+            "Skipped {} bunches on {} actor-less channels: {:?}",
+            state.skipped_actorless_bunches,
+            channels.len(),
+            channels
+        ));
+    }
+
+    // Report fingerprinting failure stats
+    if state.fingerprint_too_few_handles > 0 || state.fingerprint_no_candidates > 0 || state.fingerprint_ambiguous > 0 {
+        state.warnings.push(format!(
+            "Fingerprint failures: too_few_handles={}, no_candidates={}, ambiguous={}",
+            state.fingerprint_too_few_handles,
+            state.fingerprint_no_candidates,
+            state.fingerprint_ambiguous
+        ));
+    }
 
     let bundle = Bundle {
         schema: SchemaInfo::default(),

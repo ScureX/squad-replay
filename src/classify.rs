@@ -181,32 +181,131 @@ pub fn is_vehicle_type(type_name: &str) -> bool {
         return true;
     }
     for needle in [
-        "m1151",
-        "matv",
-        "m1a1",
-        "t72",
-        "t62",
-        "m60",
-        "brdm",
-        "lav",
-        "btr",
-        "aavp",
-        "quadbike",
-        "sprut",
-        "bmp",
-        "ural",
-        "m939",
-        "safir",
-        "uh1",
-        "mi17",
-        "truck",
-        "technical",
-        "mtlb",
-        "humvee",
-        "tank",
-        "logistics",
-        "heli",
-        "loach",
+        // === MAIN BATTLE TANKS ===
+        "m1a1",        // US M1A1 Abrams
+        "m1a2",        // US M1A2 Abrams
+        "abrams",      // US Abrams (general)
+        "t72",         // Russian T-72 variants
+        "t62",         // Russian T-62
+        "t64",         // Ukrainian T-64BM2
+        "t90",         // Russian T-90A
+        "fv4034",      // British Challenger 2
+        "challenger",  // British Challenger
+        "leopard",     // German Leopard 2A6M
+        "m60",         // Turkish M60T
+        "ztz99",       // Chinese ZTZ99A
+        
+        // === MOBILE GUN SYSTEMS ===
+        "m1128",       // US M1128 Stryker MGS
+        "sprut",       // Russian Sprut-SDM1
+        "ztd05",       // Chinese ZTD05
+        
+        // === RECONNAISSANCE VEHICLES ===
+        "coyote",      // Canadian Coyote
+        "fv107",       // British FV107 Scimitar
+        
+        // === INFANTRY FIGHTING VEHICLES ===
+        "bmp",         // Russian BMP series
+        "bmd",         // Russian BMD series (airborne)
+        "btr82",       // Russian BTR-82A
+        "fv510",       // British Warrior
+        "fv520",       // British Warrior ATGM
+        "warrior",     // British Warrior
+        "m2a3",        // US M2A3 Bradley
+        "bradley",     // US Bradley
+        "lav25",       // US/Canadian LAV-25
+        "lav-25",      // US/Canadian LAV-25
+        "aslav",       // Australian ASLAV
+        "lav6",        // Canadian LAV 6.0
+        "lav_6",       // Canadian LAV 6.0
+        "acv15",       // Turkish ACV-15
+        "acv-15",      // Turkish ACV-15
+        "pars",        // Turkish PARS III
+        "zbd04",       // Chinese ZBD04A
+        "zbd05",       // Chinese ZBD05
+        "zbd",         // Chinese ZBD series
+        "zbl08",       // Chinese ZBL08
+        "zbl",         // Chinese ZBL series
+        "zsd89",       // Chinese ZSD89
+        "zsd",         // Chinese ZSD series
+        "zsl92",       // Chinese ZSL92
+        "zsl",         // Chinese ZSL series
+        
+        // === ARMORED PERSONNEL CARRIERS ===
+        "aavp",        // US AAVP
+        "aavc",        // US AAVC
+        "btr",         // Russian BTR series
+        "fv432",       // British FV432
+        "lav",         // LAV variants
+        "m1126",       // US M1126 Stryker
+        "stryker",     // US Stryker
+        "m113",        // US M113A3
+        "tlav",        // Canadian TLAV
+        "mtlb",        // Russian MT-LB
+        "mt-lb",       // Russian MT-LB
+        "zsl10",       // Chinese ZSL10
+        
+        // === SCOUT CARS & LIGHT VEHICLES ===
+        "m1151",       // US M1151 (HMMWV)
+        "humvee",      // HMMWV
+        "matv",        // US M-ATV
+        "m-atv",       // US M-ATV
+        "brdm",        // Russian BRDM-2
+        "cobra",       // Turkish Cobra-II
+        "csk131",      // Chinese CSK131
+        "kozak",       // Ukrainian Kozak-2M1
+        "lppv",        // British LPPV
+        "luv",         // US LUV-A1
+        "luvw",        // Canadian LUVW
+        "lynx",        // Australian Lynx
+        "pmv",         // Australian PMV Bushmaster
+        "bushmaster",  // Australian PMV Bushmaster
+        "simir",       // Iranian Simir
+        "safir",       // Iranian Safir
+        "tapv",        // Canadian TAPV
+        "technical",   // Insurgent Technical
+        "tigr",        // Russian GAZ Tigr
+        "mrap",        // MRAP vehicles (general)
+        
+        // === TRANSPORT & LOGISTICS TRUCKS ===
+        "kamaz",       // Russian KamAZ 5350
+        "kraz",        // Ukrainian KrAZ-6322
+        "ural",        // Russian Ural trucks
+        "m939",        // US M939 truck
+        "man_hx",      // German MAN HX
+        "manhx",       // German MAN HX
+        "man_truck",   // German MAN truck
+        "msvs",        // Canadian MSVS
+        "ctm131",      // Chinese CTM131
+        "ctm",         // Chinese CTM trucks
+        "bmc",         // Turkish BMC-185
+        "truck",       // General truck
+        "logistics",   // Logistics vehicles
+        "logi",        // Logi shorthand
+        "util_truck",  // Utility truck
+        
+        // === ARTILLERY ===
+        "bm21",        // Russian BM-21 Grad
+        "bm-21",       // Russian BM-21 Grad
+        "grad",        // BM-21 Grad
+        "m1064",       // US M1064A3 mortar carrier
+        
+        // === MOTORBIKES ===
+        "minsk",       // Minsk 400
+        "quadbike",    // Quad bike
+        "quad_bike",   // Quad bike
+        "motorbike",   // Motorbike
+        
+        // === BOATS ===
+        "rhib",        // RHIB boat
+        "boat",        // Boats
+        
+        // === GENERAL PATTERNS ===
+        "tank",        // Tanks
+        "apc",         // APCs
+        "ifv",         // IFVs
+        "heli",        // Helicopters
+        "vehicle",     // General vehicle (in path like /Game/Vehicles/)
     ] {
         if contains_ignore_ascii_case(type_name, needle) {
             return true;
