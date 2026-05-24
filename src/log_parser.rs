@@ -373,63 +373,77 @@ pub fn parse_log_file(path: &Path) -> Result<Vec<LogMatch>, std::io::Error> {
     Ok(matches)
 }
 
-/// Find the best matching log match for a replay
+/// Find the best matching log match for a replay by comparing times.
+/// The replay file's modification time should be close to when the match ended.
 pub fn find_matching_log<'a>(
     log_matches: &'a [LogMatch],
-    replay_map: &str,
     replay_duration_ms: u64,
+    replay_end_time: Option<chrono::NaiveDateTime>,
 ) -> Option<&'a LogMatch> {
-    // Extract base map name (e.g., "Narva" from "/Game/Maps/Narva/Gameplay_Layers/Narva_RAAS_v1")
-    let replay_map_base = replay_map
-        .split('/')
-        .find(|s| !s.is_empty() && *s != "Game" && *s != "Maps" && !s.contains("Gameplay"))
-        .unwrap_or(replay_map)
-        .to_lowercase();
+    println!("[log] Searching {} matches in log", log_matches.len());
     
-    println!("[log] Searching {} matches in log for map '{}'", log_matches.len(), replay_map_base);
+    if let Some(replay_end) = replay_end_time {
+        println!("[log] Replay file time: {}", replay_end.format("%Y-%m-%d %H:%M:%S"));
+    }
     
     let mut best_match: Option<&LogMatch> = None;
-    let mut best_score = 0i32;
+    let mut best_time_diff: i64 = i64::MAX;
     
     for log_match in log_matches {
-        let mut score = 0i32;
+        // Get the log match end time
+        let log_end = match log_match.end_time {
+            Some(t) => t,
+            None => continue, // Skip matches without end time
+        };
         
-        // Check map name match
-        let log_map = log_match.map.to_lowercase();
-        
-        if log_map.contains(&replay_map_base) || replay_map_base.contains(&log_map) {
-            score += 10;
+        // If we have replay end time, match by time proximity
+        if let Some(replay_end) = replay_end_time {
+            // The replay file modification time should be close to match end time
+            // Allow some tolerance (replay might be written a few seconds/minutes after match end)
+            let time_diff = (replay_end - log_end).num_seconds().abs();
+            
+            // Must be within 30 minutes of each other
+            if time_diff > 30 * 60 {
+                continue;
+            }
+            
+            // Also check duration matches roughly (within 20%)
+            let log_duration = log_match.duration_ms();
+            let duration_diff = (log_duration as i64 - replay_duration_ms as i64).abs();
+            let duration_tolerance = (replay_duration_ms as i64) / 5; // 20%
+            
+            if duration_diff > duration_tolerance {
+                continue;
+            }
+            
+            if time_diff < best_time_diff {
+                best_time_diff = time_diff;
+                best_match = Some(log_match);
+            }
         } else {
-            // Skip this match entirely if map doesn't match
-            continue;
-        }
-        
-        // Check duration similarity
-        let log_duration = log_match.duration_ms();
-        let diff = (log_duration as i64 - replay_duration_ms as i64).unsigned_abs();
-        let tolerance = replay_duration_ms / 10; // 10%
-        
-        if diff < tolerance {
-            score += 5;
-        } else if diff < tolerance * 2 {
-            score += 2;
-        }
-        
-        // Prefer matches with more events
-        score += (log_match.events.len() / 100).min(3) as i32;
-        
-        if score > best_score {
-            best_score = score;
-            best_match = Some(log_match);
+            // Fallback: match by duration only (less reliable)
+            let log_duration = log_match.duration_ms();
+            let duration_diff = (log_duration as i64 - replay_duration_ms as i64).abs();
+            let duration_tolerance = (replay_duration_ms as i64) / 10; // 10%
+            
+            if duration_diff < duration_tolerance && duration_diff < best_time_diff {
+                best_time_diff = duration_diff;
+                best_match = Some(log_match);
+            }
         }
     }
     
     if let Some(m) = best_match {
-        println!("[log] Match found: {} - {} ({} events)", m.map, m.layer, m.events.len());
+        let end_str = m.end_time.map(|t| t.format("%Y-%m-%d %H:%M:%S").to_string()).unwrap_or_default();
+        println!("[log] Match found: {} - {} (ended {}, {} events)", 
+            m.map, m.layer, end_str, m.events.len());
     } else {
-        println!("[log] No match found for map '{}'. Log contains: {}", 
-            replay_map_base,
-            log_matches.iter().map(|m| m.map.as_str()).collect::<Vec<_>>().join(", "));
+        println!("[log] No matching log found. Available matches:");
+        for m in log_matches {
+            let end_str = m.end_time.map(|t| t.format("%H:%M:%S").to_string()).unwrap_or("ongoing".to_string());
+            let dur_min = m.duration_ms() / 60000;
+            println!("[log]   {} - {} (ended {}, {}min)", m.map, m.layer, end_str, dur_min);
+        }
     }
     
     best_match

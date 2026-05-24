@@ -78,16 +78,31 @@ pub use error::{Error, Result};
 
 /// Parse a replay file from disk.
 pub fn parse_file(path: impl AsRef<Path>, options: &ParseOptions) -> Result<Bundle> {
-    let mut bundle = parser::parse_file(&path, options.include_property_events)?;
+    let path = path.as_ref();
+    let mut bundle = parser::parse_file(path, options.include_property_events)?;
     
     // Merge log data if provided
     if let Some(log_path) = &options.log_path {
         if log_path.exists() {
             if let Ok(log_matches) = log_parser::parse_log_file(log_path) {
-                let replay_map = bundle.replay.map_name.as_deref().unwrap_or("");
                 let replay_duration = bundle.replay.duration_ms;
                 
-                if let Some(log_match) = log_parser::find_matching_log(&log_matches, replay_map, replay_duration) {
+                // Get replay file modification time for matching
+                let replay_end_time = std::fs::metadata(path)
+                    .and_then(|m| m.modified())
+                    .ok()
+                    .and_then(|t| {
+                        use std::time::UNIX_EPOCH;
+                        t.duration_since(UNIX_EPOCH).ok()
+                    })
+                    .map(|d| {
+                        let secs = d.as_secs() as i64;
+                        chrono::DateTime::from_timestamp(secs, 0)
+                            .map(|dt| dt.naive_utc())
+                    })
+                    .flatten();
+                
+                if let Some(log_match) = log_parser::find_matching_log(&log_matches, replay_duration, replay_end_time) {
                     log_parser::merge_log_into_players(&mut bundle.players, log_match, replay_duration);
                 }
             }
@@ -109,10 +124,10 @@ pub fn parse_bytes(
     if let Some(log_path) = &options.log_path {
         if log_path.exists() {
             if let Ok(log_matches) = log_parser::parse_log_file(log_path) {
-                let replay_map = bundle.replay.map_name.as_deref().unwrap_or("");
                 let replay_duration = bundle.replay.duration_ms;
                 
-                if let Some(log_match) = log_parser::find_matching_log(&log_matches, replay_map, replay_duration) {
+                // No file to get modification time from - will use duration fallback
+                if let Some(log_match) = log_parser::find_matching_log(&log_matches, replay_duration, None) {
                     log_parser::merge_log_into_players(&mut bundle.players, log_match, replay_duration);
                 }
             }
