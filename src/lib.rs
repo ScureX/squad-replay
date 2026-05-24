@@ -87,20 +87,14 @@ pub fn parse_file(path: impl AsRef<Path>, options: &ParseOptions) -> Result<Bund
             if let Ok(log_matches) = log_parser::parse_log_file(log_path) {
                 let replay_duration = bundle.replay.duration_ms;
                 
-                // Get replay file modification time for matching
+                // Get replay file modification time for matching (in local time to match log timestamps)
                 let replay_end_time = std::fs::metadata(path)
                     .and_then(|m| m.modified())
                     .ok()
-                    .and_then(|t| {
-                        use std::time::UNIX_EPOCH;
-                        t.duration_since(UNIX_EPOCH).ok()
-                    })
-                    .map(|d| {
-                        let secs = d.as_secs() as i64;
-                        chrono::DateTime::from_timestamp(secs, 0)
-                            .map(|dt| dt.naive_utc())
-                    })
-                    .flatten();
+                    .map(|t| {
+                        let datetime: chrono::DateTime<chrono::Local> = t.into();
+                        datetime.naive_local()
+                    });
                 
                 if let Some(log_match) = log_parser::find_matching_log(&log_matches, replay_duration, replay_end_time) {
                     log_parser::merge_log_into_players(&mut bundle.players, log_match, replay_duration);
