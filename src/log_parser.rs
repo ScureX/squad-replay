@@ -134,14 +134,44 @@ fn extract_steam_id(ids: &str) -> Option<String> {
     re.captures(ids).map(|c| c[1].to_string())
 }
 
+/// Extract map name and layer from path segments.
+/// Path examples:
+/// - /Game/Maps/Narva/Gameplay_Layers/Narva_RAAS_v1.Narva_RAAS_v1
+/// - /Al_Basrah/Maps/Gameplay_Layers/AlBasrah_RAAS_v3.AlBasrah_RAAS_v3
+/// - /Game/Maps/TransitionMap.TransitionMap
+fn extract_map_and_layer(parts: &[&str]) -> (String, String) {
+    // Find the layer name (last segment, strip .Extension)
+    let layer = parts.last()
+        .map(|s| s.split('.').next().unwrap_or(s).to_string())
+        .unwrap_or_default();
+    
+    // Find map name by looking for the meaningful segment
+    // Skip: "Game", "Maps", "Gameplay_Layers", "Coop", and the layer file
+    let map = parts.iter()
+        .filter(|&&s| {
+            s != "Game" && 
+            s != "Maps" && 
+            s != "Gameplay_Layers" && 
+            s != "Coop" &&
+            s != "FoundersPack" &&
+            s != "FreeMissions" &&
+            !s.contains('.')  // Skip layer filename
+        })
+        .next()
+        .map(|s| s.to_string())
+        .unwrap_or_else(|| layer.clone());
+    
+    (map, layer)
+}
+
 /// Parse a Squad game log file
 pub fn parse_log_file(path: &Path) -> Result<Vec<LogMatch>, std::io::Error> {
     let file = File::open(path)?;
     let reader = BufReader::new(file);
     
-    // Compile regexes
+    // Compile regexes - capture the full path and extract map name later
     let re_new_game = Regex::new(
-        r"^\[([0-9.:-]+)\]\[([ 0-9]*)\]LogWorld: Bringing World /([A-Za-z0-9]+)/(?:Maps/)?([A-Za-z0-9_-]+)/(?:.+/)?([A-Za-z0-9_-]+)"
+        r"^\[([0-9.:-]+)\]\[([ 0-9]*)\]LogWorld: Bringing World (/[^\s]+) up for play"
     ).unwrap();
     
     let re_player_connected = Regex::new(
@@ -187,8 +217,16 @@ pub fn parse_log_file(path: &Path) -> Result<Vec<LogMatch>, std::io::Error> {
                 Some(t) => t,
                 None => continue,
             };
-            let map = caps[4].to_string();
-            let layer = caps[5].to_string();
+            
+            // Extract map and layer from full path like:
+            // /Game/Maps/Narva/Gameplay_Layers/Narva_RAAS_v1.Narva_RAAS_v1
+            // /Al_Basrah/Maps/Gameplay_Layers/AlBasrah_RAAS_v3.AlBasrah_RAAS_v3
+            let full_path = &caps[3];
+            let parts: Vec<&str> = full_path.split('/').filter(|s| !s.is_empty()).collect();
+            
+            // Find map name: look for segment before "Gameplay_Layers" or "Maps"
+            // or extract from the layer filename
+            let (map, layer) = extract_map_and_layer(&parts);
             
             // Skip transition maps
             if map.contains("Transition") {
@@ -341,6 +379,15 @@ pub fn find_matching_log<'a>(
     replay_map: &str,
     replay_duration_ms: u64,
 ) -> Option<&'a LogMatch> {
+    // Extract base map name (e.g., "Narva" from "/Game/Maps/Narva/Gameplay_Layers/Narva_RAAS_v1")
+    let replay_map_base = replay_map
+        .split('/')
+        .find(|s| !s.is_empty() && *s != "Game" && *s != "Maps" && !s.contains("Gameplay"))
+        .unwrap_or(replay_map)
+        .to_lowercase();
+    
+    println!("[log] Searching {} matches in log for map '{}'", log_matches.len(), replay_map_base);
+    
     let mut best_match: Option<&LogMatch> = None;
     let mut best_score = 0i32;
     
@@ -349,10 +396,12 @@ pub fn find_matching_log<'a>(
         
         // Check map name match
         let log_map = log_match.map.to_lowercase();
-        let replay_map_lower = replay_map.to_lowercase();
         
-        if log_map.contains(&replay_map_lower) || replay_map_lower.contains(&log_map) {
+        if log_map.contains(&replay_map_base) || replay_map_base.contains(&log_map) {
             score += 10;
+        } else {
+            // Skip this match entirely if map doesn't match
+            continue;
         }
         
         // Check duration similarity
@@ -373,6 +422,14 @@ pub fn find_matching_log<'a>(
             best_score = score;
             best_match = Some(log_match);
         }
+    }
+    
+    if let Some(m) = best_match {
+        println!("[log] Match found: {} - {} ({} events)", m.map, m.layer, m.events.len());
+    } else {
+        println!("[log] No match found for map '{}'. Log contains: {}", 
+            replay_map_base,
+            log_matches.iter().map(|m| m.map.as_str()).collect::<Vec<_>>().join(", "));
     }
     
     best_match
@@ -463,6 +520,7 @@ pub fn merge_log_into_players(
     }
     
     // Apply log data to players
+    let mut updated_count = 0;
     for player in players.iter_mut() {
         let eos_id = match &player.eos_id {
             Some(id) => id.to_lowercase(),
@@ -470,6 +528,8 @@ pub fn merge_log_into_players(
         };
         
         if let Some(state) = player_states.get(&eos_id) {
+            updated_count += 1;
+            
             // Set connect/disconnect times
             player.connect_time_ms = state.connect_time_ms;
             player.disconnect_time_ms = state.disconnect_time_ms;
@@ -512,4 +572,7 @@ pub fn merge_log_into_players(
             }
         }
     }
+    
+    println!("[log] Merged log data into {}/{} players ({} events in log)", 
+        updated_count, players.len(), log_match.events.len());
 }
