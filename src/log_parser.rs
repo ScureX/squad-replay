@@ -414,12 +414,13 @@ pub fn find_matching_log<'a>(
                 continue;
             }
             
-            // Also check duration matches roughly (within 20%)
+            // Check duration: replay can be shorter (user exited early) but not much longer
             let log_duration = log_match.duration_ms();
-            let duration_diff = (log_duration as i64 - replay_duration_ms as i64).abs();
-            let duration_tolerance = (replay_duration_ms as i64) / 5; // 20%
+            let replay_longer_by = replay_duration_ms as i64 - log_duration as i64;
             
-            if duration_diff > duration_tolerance {
+            // Reject if replay is significantly longer than the match (more than 5 min)
+            // But allow replay to be shorter (user ended early)
+            if replay_longer_by > 5 * 60 * 1000 {
                 continue;
             }
             
