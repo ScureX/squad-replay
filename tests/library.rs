@@ -77,6 +77,8 @@ fn no_properties_keeps_derived_outputs_when_fixture_is_available() {
         &fixture,
         &ParseOptions {
             include_property_events: false,
+            log_path: None,
+            tz_offset_hours: 0,
         },
     )
     .expect("fixture replay should parse without raw property retention");

@@ -84,6 +84,8 @@ fn parse_options_suppress_properties_without_affecting_snapshot_counts() {
             &replay_path,
             &ParseOptions {
                 include_property_events: false,
+                log_path: None,
+                tz_offset_hours: 0,
             },
         )
         .unwrap_or_else(|error| panic!("{}: parse without props failed: {error}", fixture.name));

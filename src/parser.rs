@@ -2086,10 +2086,12 @@ fn canonical_provenance_report() -> Vec<ProvenanceEntry> {
 }
 
 fn normalize_team_id(raw_team_id: u32, known_team_ids: &HashSet<u32>) -> u32 {
-    if known_team_ids.contains(&raw_team_id) {
-        raw_team_id
-    } else if raw_team_id > 0 && known_team_ids.contains(&(raw_team_id - 1)) {
+    // Squad log uses 1-based team IDs (1, 2), replay uses 0-based (0, 1)
+    // If raw_team_id-1 is valid, assume it's log-style and convert
+    if raw_team_id > 0 && known_team_ids.contains(&(raw_team_id - 1)) {
         raw_team_id - 1
+    } else if known_team_ids.contains(&raw_team_id) {
+        raw_team_id
     } else {
         raw_team_id
     }
@@ -5663,10 +5665,12 @@ mod tests {
     }
 
     #[test]
-    fn normalizes_team_id_with_raw_minus_one_fallback() {
+    fn normalizes_team_id_from_log_style_to_replay_style() {
         let known = HashSet::from([0_u32, 1_u32]);
-        assert_eq!(normalize_team_id(2, &known), 1);
-        assert_eq!(normalize_team_id(1, &known), 1);
+        // Log uses 1-based (1, 2), replay uses 0-based (0, 1)
+        assert_eq!(normalize_team_id(2, &known), 1);  // Log team 2 → Replay team 1
+        assert_eq!(normalize_team_id(1, &known), 0);  // Log team 1 → Replay team 0
+        assert_eq!(normalize_team_id(0, &known), 0);  // Already 0-based
     }
 
     #[test]
