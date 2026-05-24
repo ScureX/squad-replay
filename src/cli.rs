@@ -97,6 +97,14 @@ enum Command {
             help = "Skip raw property events to keep output smaller and easier to inspect"
         )]
         no_properties: bool,
+        #[arg(
+            long,
+            short = 't',
+            default_value = "0",
+            value_name = "HOURS",
+            help = "Timezone offset in hours for log timestamps (e.g., 2 if server is UTC and you are UTC+2)"
+        )]
+        tz_offset: i32,
     },
     #[command(about = "Read a .replay file and print a summary")]
     #[command(after_help = INSPECT_AFTER_HELP)]
@@ -450,12 +458,14 @@ pub fn run() -> Result<()> {
             output,
             compat_json,
             no_properties,
+            tz_offset,
         } => {
             let formats = OutputSelection::parse_csv(&format).map_err(Error::Message)?;
             let output_base = output.unwrap_or_else(|| default_output_base(&input));
             let options = ParseOptions {
                 include_property_events: !no_properties,
                 log_path: log,
+                tz_offset_hours: tz_offset,
             };
             let bundle = parse_file(&input, &options)?;
             let written = write_outputs(&bundle, &formats, &output_base, compat_json)?;
@@ -477,6 +487,7 @@ pub fn run() -> Result<()> {
             let options = ParseOptions {
                 include_property_events: !no_properties,
                 log_path: None,
+                tz_offset_hours: 0,
             };
             let bundle = parse_file(&input, &options)?;
             let input_display = path_text(&input);

@@ -602,4 +602,6 @@ pub struct ParseOptions {
     pub include_property_events: bool,
     /// Path to SquadGame.log for event merging
     pub log_path: Option<std::path::PathBuf>,
+    /// Timezone offset in hours for log timestamps (server vs local)
+    pub tz_offset_hours: i32,
 }

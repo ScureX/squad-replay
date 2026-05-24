@@ -96,7 +96,7 @@ pub fn parse_file(path: impl AsRef<Path>, options: &ParseOptions) -> Result<Bund
                         datetime.naive_local()
                     });
                 
-                if let Some(log_match) = log_parser::find_matching_log(&log_matches, replay_duration, replay_end_time) {
+                if let Some(log_match) = log_parser::find_matching_log(&log_matches, replay_duration, replay_end_time, options.tz_offset_hours) {
                     log_parser::merge_log_into_players(&mut bundle.players, log_match, replay_duration);
                 }
             }
@@ -121,7 +121,7 @@ pub fn parse_bytes(
                 let replay_duration = bundle.replay.duration_ms;
                 
                 // No file to get modification time from - will use duration fallback
-                if let Some(log_match) = log_parser::find_matching_log(&log_matches, replay_duration, None) {
+                if let Some(log_match) = log_parser::find_matching_log(&log_matches, replay_duration, None, options.tz_offset_hours) {
                     log_parser::merge_log_into_players(&mut bundle.players, log_match, replay_duration);
                 }
             }

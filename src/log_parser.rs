@@ -375,24 +375,31 @@ pub fn parse_log_file(path: &Path) -> Result<Vec<LogMatch>, std::io::Error> {
 
 /// Find the best matching log match for a replay by comparing times.
 /// The replay file's modification time should be close to when the match ended.
+/// tz_offset_hours adjusts log timestamps (e.g., 2 if server is UTC and local is UTC+2).
 pub fn find_matching_log<'a>(
     log_matches: &'a [LogMatch],
     replay_duration_ms: u64,
     replay_end_time: Option<chrono::NaiveDateTime>,
+    tz_offset_hours: i32,
 ) -> Option<&'a LogMatch> {
     println!("[log] Searching {} matches in log", log_matches.len());
     
     if let Some(replay_end) = replay_end_time {
         println!("[log] Replay file time: {}", replay_end.format("%Y-%m-%d %H:%M:%S"));
     }
+    if tz_offset_hours != 0 {
+        println!("[log] Applying timezone offset: +{}h to log times", tz_offset_hours);
+    }
+    
+    let tz_offset = chrono::Duration::hours(tz_offset_hours as i64);
     
     let mut best_match: Option<&LogMatch> = None;
     let mut best_time_diff: i64 = i64::MAX;
     
     for log_match in log_matches {
-        // Get the log match end time
+        // Get the log match end time, adjusted for timezone
         let log_end = match log_match.end_time {
-            Some(t) => t,
+            Some(t) => t + tz_offset,
             None => continue, // Skip matches without end time
         };
         
@@ -434,13 +441,13 @@ pub fn find_matching_log<'a>(
     }
     
     if let Some(m) = best_match {
-        let end_str = m.end_time.map(|t| t.format("%Y-%m-%d %H:%M:%S").to_string()).unwrap_or_default();
+        let end_str = m.end_time.map(|t| (t + tz_offset).format("%Y-%m-%d %H:%M:%S").to_string()).unwrap_or_default();
         println!("[log] Match found: {} - {} (ended {}, {} events)", 
             m.map, m.layer, end_str, m.events.len());
     } else {
         println!("[log] No matching log found. Available matches:");
         for m in log_matches {
-            let end_str = m.end_time.map(|t| t.format("%H:%M:%S").to_string()).unwrap_or("ongoing".to_string());
+            let end_str = m.end_time.map(|t| (t + tz_offset).format("%H:%M:%S").to_string()).unwrap_or("ongoing".to_string());
             let dur_min = m.duration_ms() / 60000;
             println!("[log]   {} - {} (ended {}, {}min)", m.map, m.layer, end_str, dur_min);
         }
