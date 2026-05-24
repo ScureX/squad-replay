@@ -51,6 +51,12 @@ pub enum LogEventType {
         attacker: String,
         weapon: String,
     },
+    PlayerRevived {
+        medic: String,
+        medic_ids: String,
+        victim: String,
+        victim_ids: String,
+    },
     RoundEnd,
 }
 
@@ -196,6 +202,10 @@ pub fn parse_log_file(path: &Path) -> Result<Vec<LogMatch>, std::io::Error> {
     
     let re_player_died = Regex::new(
         r"^\[([0-9.:-]+)\]\[([ 0-9]*)\]LogSquadTrace: \[DedicatedServer\](?:ASQSoldier::)?Die\(\): Player:(.+) KillingDamage=[-0-9.]+ from ([A-Za-z_0-9]+) \(Online IDs:[^)]+\| Contoller ID: [\w\d]+\) caused by ([A-Za-z_0-9-]+)_C"
+    ).unwrap();
+    
+    let re_player_revived = Regex::new(
+        r"^\[([0-9.:-]+)\]\[([ 0-9]*)\]LogSquad: (.+) \(Online IDs:([^)]+)\) has revived (.+) \(Online IDs:([^)]+)\)\."
     ).unwrap();
     
     let re_round_end = Regex::new(
@@ -345,6 +355,23 @@ pub fn parse_log_file(path: &Path) -> Result<Vec<LogMatch>, std::io::Error> {
                         victim: caps[3].to_string(),
                         attacker: caps[4].to_string(),
                         weapon: caps[5].to_string(),
+                    },
+                });
+            }
+            continue;
+        }
+        
+        // Player revived
+        if let Some(caps) = re_player_revived.captures(&line) {
+            if let Some(timestamp) = parse_timestamp(&caps[1]) {
+                let t_ms = ((timestamp - current.start_time).num_milliseconds().max(0)) as u64;
+                current.events.push(LogEvent {
+                    t_ms,
+                    event_type: LogEventType::PlayerRevived {
+                        medic: caps[3].to_string(),
+                        medic_ids: caps[4].to_string(),
+                        victim: caps[5].to_string(),
+                        victim_ids: caps[6].to_string(),
                     },
                 });
             }
