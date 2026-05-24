@@ -117,6 +117,9 @@ pub struct Player {
     pub squad_creator_steam_id: Option<String>,
     pub squad_creator_eos_id: Option<String>,
     pub start_time_ms: Option<u64>,
+    /// Time windows when the player was visible (possessing a pawn).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub visibility_windows: Vec<VisibilityWindow>,
     pub notes: Vec<String>,
 }
 
@@ -134,6 +137,13 @@ pub struct Rotator {
     pub pitch: f64,
     pub yaw: f64,
     pub roll: f64,
+}
+
+/// A time window during which a player is visible (spawned/possessing a pawn).
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct VisibilityWindow {
+    pub start_ms: u64,
+    pub end_ms: u64,
 }
 
 /// Replicated movement state for a networked actor.

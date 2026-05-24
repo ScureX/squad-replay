@@ -169,6 +169,10 @@ struct PlayerBuilder {
     deploy_role_name: Option<String>,
     player_type_name: Option<String>,
     start_time_ms: Option<u64>,
+    /// Tracks visibility window start times (when pawn was possessed)
+    visibility_window_start: Option<u64>,
+    /// Completed visibility windows
+    visibility_windows: Vec<(u64, u64)>,
     notes: Vec<String>,
 }
 
@@ -2862,7 +2866,33 @@ fn apply_property_event(
                     }
                 }
                 "Soldier" => player.soldier_guid = decoded.int_packed,
-                "CurrentPawn" => player.current_pawn_guid = decoded.int_packed,
+                "CurrentPawn" => {
+                    let old_pawn = player.current_pawn_guid;
+                    let new_pawn = decoded.int_packed;
+                    player.current_pawn_guid = new_pawn;
+                    
+                    // Track visibility windows based on pawn possession
+                    match (old_pawn, new_pawn) {
+                        (None, Some(_)) => {
+                            // Player possessed a pawn - start visibility window
+                            player.visibility_window_start = Some(context.t_ms);
+                        }
+                        (Some(_), None) => {
+                            // Player released pawn - end visibility window
+                            if let Some(start) = player.visibility_window_start.take() {
+                                player.visibility_windows.push((start, context.t_ms));
+                            }
+                        }
+                        (Some(_), Some(_)) => {
+                            // Pawn changed (e.g., respawn) - end old, start new
+                            if let Some(start) = player.visibility_window_start.take() {
+                                player.visibility_windows.push((start, context.t_ms));
+                            }
+                            player.visibility_window_start = Some(context.t_ms);
+                        }
+                        (None, None) => {}
+                    }
+                }
                 "TeamState" => player.team_state_guid = decoded.int_packed,
                 "SquadState" => player.squad_state_guid = decoded.int_packed,
                 "CurrentRoleId" => {
@@ -4317,7 +4347,31 @@ fn reconstruct_anchored_helicopter_track(
     Some(HelicopterTrackReconstruction { accepted_samples })
 }
 
-fn finalize_tracks(state: &mut ParseState) -> TrackGroups {
+/// Compute visibility windows from position sample timestamps.
+/// Creates a single window from the first to last sample time.
+/// This indicates when the player had position data being recorded.
+fn compute_visibility_from_samples(
+    samples: &[TrackSample3],
+    _duration_ms: u64,
+) -> Vec<crate::bundle::VisibilityWindow> {
+    if samples.is_empty() {
+        return Vec::new();
+    }
+
+    // Simple approach: one window from first to last sample
+    let first_ms = samples.first().unwrap().t_ms;
+    let last_ms = samples.last().unwrap().t_ms;
+
+    vec![crate::bundle::VisibilityWindow {
+        start_ms: first_ms,
+        end_ms: last_ms,
+    }]
+}
+
+fn finalize_tracks(
+    state: &mut ParseState,
+    duration_ms: u64,
+) -> (TrackGroups, HashMap<String, Vec<crate::bundle::VisibilityWindow>>) {
     let mut player_state_to_name = HashMap::new();
     let mut actor_to_player_state = HashMap::new();
 
@@ -4357,20 +4411,6 @@ fn finalize_tracks(state: &mut ParseState) -> TrackGroups {
             });
     }
 
-    let mut vehicle_tracks_map: HashMap<String, VehicleTrackEntry> = HashMap::new();
-    for sample in &state.raw_vehicle_samples {
-        let key = sample.key.clone().unwrap_or_else(|| "vehicle".to_string());
-        let entry = vehicle_tracks_map
-            .entry(key.clone())
-            .or_insert_with(|| (sample.actor_guid, sample.class_name.clone(), Vec::new()));
-        entry.2.push(TrackSample3 {
-            t_ms: sample.t_ms,
-            x: round2(sample.x),
-            y: round2(sample.y),
-            z: round2(sample.z),
-        });
-    }
-
     let mut players = player_tracks_map
         .into_iter()
         .map(|(key, mut samples)| {
@@ -4385,6 +4425,30 @@ fn finalize_tracks(state: &mut ParseState) -> TrackGroups {
             }
         })
         .collect::<Vec<_>>();
+
+    // Compute visibility windows from the finalized (sorted) player tracks
+    let mut player_visibility: HashMap<String, Vec<crate::bundle::VisibilityWindow>> =
+        HashMap::new();
+    for track in &players {
+        let windows = compute_visibility_from_samples(&track.samples, duration_ms);
+        if !windows.is_empty() {
+            player_visibility.insert(track.key.clone(), windows);
+        }
+    }
+
+    let mut vehicle_tracks_map: HashMap<String, VehicleTrackEntry> = HashMap::new();
+    for sample in &state.raw_vehicle_samples {
+        let key = sample.key.clone().unwrap_or_else(|| "vehicle".to_string());
+        let entry = vehicle_tracks_map
+            .entry(key.clone())
+            .or_insert_with(|| (sample.actor_guid, sample.class_name.clone(), Vec::new()));
+        entry.2.push(TrackSample3 {
+            t_ms: sample.t_ms,
+            x: round2(sample.x),
+            y: round2(sample.y),
+            z: round2(sample.z),
+        });
+    }
 
     let mut helicopter_component_samples: HashMap<u32, Vec<HelicopterMovementSample>> =
         HashMap::new();
@@ -4495,11 +4559,14 @@ fn finalize_tracks(state: &mut ParseState) -> TrackGroups {
     vehicles.sort_by(|a, b| a.key.cmp(&b.key));
     helicopters.sort_by(|a, b| a.key.cmp(&b.key));
 
-    TrackGroups {
-        players,
-        vehicles,
-        helicopters,
-    }
+    (
+        TrackGroups {
+            players,
+            vehicles,
+            helicopters,
+        },
+        player_visibility,
+    )
 }
 
 fn finalize_roster_and_seats(
@@ -5006,37 +5073,61 @@ fn parse_data(
     state.raw_vehicle_samples.shrink_to_fit();
     state.raw_helicopter_samples.shrink_to_fit();
 
-    let tracks = finalize_tracks(&mut state);
+    let duration_ms = outer.length_in_ms as u64;
+    let (tracks, player_visibility) = finalize_tracks(&mut state, duration_ms);
 
     let mut players = state
         .player_builders
         .values()
         .cloned()
-        .map(|builder| Player {
-            player_state_guid: builder.player_state_guid,
-            name: builder.name,
-            steam_id: builder.steam_id,
-            eos_id: builder.eos_id,
-            online_user_id: builder.online_user_id,
-            identity_raw: builder.identity_raw,
-            soldier_guid: builder.soldier_guid,
-            current_pawn_guid: builder.current_pawn_guid,
-            team_id: None,
-            faction: None,
-            team_state_guid: builder.team_state_guid,
-            squad_id: None,
-            squad_state_guid: builder.squad_state_guid,
-            current_role_id: builder.current_role_id,
-            current_role_name: builder.current_role_name,
-            deploy_role_id: builder.deploy_role_id,
-            deploy_role_name: builder.deploy_role_name,
-            player_type_name: builder.player_type_name,
-            squad_leader_name: None,
-            squad_creator_name: None,
-            squad_creator_steam_id: None,
-            squad_creator_eos_id: None,
-            start_time_ms: builder.start_time_ms,
-            notes: builder.notes,
+        .map(|mut builder| {
+            // Prefer visibility windows from position samples (most accurate)
+            // Only fall back to pawn tracking if no position data
+            let visibility_windows = builder.name.as_ref()
+                .and_then(|name| player_visibility.get(name))
+                .filter(|windows| !windows.is_empty())
+                .cloned()
+                .unwrap_or_else(|| {
+                    // Fallback: use pawn-based visibility windows
+                    if let Some(start) = builder.visibility_window_start {
+                        builder.visibility_windows.push((start, duration_ms));
+                    }
+                    builder.visibility_windows
+                        .into_iter()
+                        .map(|(start, end)| crate::bundle::VisibilityWindow {
+                            start_ms: start,
+                            end_ms: end,
+                        })
+                        .collect()
+                });
+            
+            Player {
+                player_state_guid: builder.player_state_guid,
+                name: builder.name,
+                steam_id: builder.steam_id,
+                eos_id: builder.eos_id,
+                online_user_id: builder.online_user_id,
+                identity_raw: builder.identity_raw,
+                soldier_guid: builder.soldier_guid,
+                current_pawn_guid: builder.current_pawn_guid,
+                team_id: None,
+                faction: None,
+                team_state_guid: builder.team_state_guid,
+                squad_id: None,
+                squad_state_guid: builder.squad_state_guid,
+                current_role_id: builder.current_role_id,
+                current_role_name: builder.current_role_name,
+                deploy_role_id: builder.deploy_role_id,
+                deploy_role_name: builder.deploy_role_name,
+                player_type_name: builder.player_type_name,
+                squad_leader_name: None,
+                squad_creator_name: None,
+                squad_creator_steam_id: None,
+                squad_creator_eos_id: None,
+                start_time_ms: builder.start_time_ms,
+                visibility_windows,
+                notes: builder.notes,
+            }
         })
         .collect::<Vec<_>>();
     players.sort_by(|a, b| a.name.cmp(&b.name));
