@@ -369,6 +369,30 @@ pub struct WeaponStateEvent {
     pub value_string: Option<String>,
 }
 
+/// A state change event for a capture zone (flag).
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct CaptureZoneEvent {
+    pub t_ms: u64,
+    pub second: u32,
+    pub event_type: String, // "owning_team", "capture_percent", "capture_direction"
+    pub value_int: Option<i64>,
+    pub value_float: Option<f64>,
+}
+
+/// A capture zone (flag/objective) in the game.
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct CaptureZone {
+    pub actor_guid: u32,
+    pub component_guid: Option<u32>,
+    pub name: Option<String>,           // e.g., "C1-Diefenbunker", "B7-Alma"
+    pub display_name: Option<String>,   // Friendly name extracted from path
+    pub x: Option<f64>,
+    pub y: Option<f64>,
+    pub z: Option<f64>,
+    pub initial_owning_team: Option<i64>,
+    pub events: Vec<CaptureZoneEvent>,
+}
+
 /// All classified game events extracted from the replay.
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct EventGroups {
@@ -378,6 +402,7 @@ pub struct EventGroups {
     pub component_states: Vec<ComponentStateEvent>,
     pub vehicle_states: Vec<VehicleStateEvent>,
     pub weapon_states: Vec<WeaponStateEvent>,
+    pub capture_zones: Vec<CaptureZone>,
     pub properties: Vec<PropertyEvent>,
 }
 

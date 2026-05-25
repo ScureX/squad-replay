@@ -314,6 +314,12 @@ pub fn is_vehicle_type(type_name: &str) -> bool {
     false
 }
 
+/// Returns `true` if `type_name` looks like a capture zone class.
+pub fn is_capture_zone_type(type_name: &str) -> bool {
+    contains_ignore_ascii_case(type_name, "capturezone")
+        || contains_ignore_ascii_case(type_name, "sqcapturezone")
+}
+
 pub fn classify_deployable_event_type(type_name: &str) -> &'static str {
     if contains_ignore_ascii_case(type_name, "fobradio") {
         "RADIO"

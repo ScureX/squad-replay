@@ -1,13 +1,15 @@
 use crate::bundle::{
-    ActorEntity, ActorGroups, Bundle, ComponentEntity, ComponentStateEvent, DecodedPropertyValue,
-    DeploymentEvent, Diagnostics, EventGroups, GameStateInfo, KillEvent, Player, PropertyEvent,
-    ProvenanceEntry, RepMovement, ReplayEngineInfo, ReplayInfoSection, ReplaySourceInfo, Rotator,
-    SchemaInfo, SeatChangeEvent, Squad, StringInventory, Team, Track3, TrackGroups, TrackSample3,
-    Vec3, VehicleStateEvent, WeaponStateEvent,
+    ActorEntity, ActorGroups, Bundle, CaptureZone, CaptureZoneEvent, ComponentEntity,
+    ComponentStateEvent, DecodedPropertyValue, DeploymentEvent, Diagnostics, EventGroups,
+    GameStateInfo, KillEvent, Player, PropertyEvent, ProvenanceEntry, RepMovement,
+    ReplayEngineInfo, ReplayInfoSection, ReplaySourceInfo, Rotator, SchemaInfo, SeatChangeEvent,
+    Squad, StringInventory, Team, Track3, TrackGroups, TrackSample3, Vec3, VehicleStateEvent,
+    WeaponStateEvent,
 };
 use crate::classify::{
     ClassifyFlags, classify_deployable_event_type, infer_component_type_name, infer_group_leaf,
-    is_deployable_primary_type, is_helicopter_type, is_vehicle_type, normalize_type,
+    is_capture_zone_type, is_deployable_primary_type, is_helicopter_type, is_vehicle_type,
+    normalize_type,
 };
 use crate::error::{Error, Result};
 use crate::unreal_names::unreal_name;
@@ -196,6 +198,18 @@ struct ComponentBuilder {
 }
 
 #[derive(Debug, Clone, Default)]
+struct CaptureZoneBuilder {
+    actor_guid: u32,
+    component_guid: Option<u32>,
+    name: Option<String>,
+    x: Option<f64>,
+    y: Option<f64>,
+    z: Option<f64>,
+    initial_owning_team: Option<i64>,
+    events: Vec<CaptureZoneEvent>,
+}
+
+#[derive(Debug, Clone, Default)]
 struct RawSample {
     t_ms: u64,
     actor_guid: Option<u32>,
@@ -286,6 +300,7 @@ struct ParseState {
     player_actor_to_state: U32HashMap<u32>,
     deployables: U32HashMap<DeployableBuilder>,
     component_builders: U32HashMap<ComponentBuilder>,
+    capture_zone_builders: U32HashMap<CaptureZoneBuilder>,
     teams_by_actor_guid: BTreeMap<u32, TeamTemp>,
     public_squads_by_state_guid: BTreeMap<u32, SquadTemp>,
     private_squads_by_actor_guid: BTreeMap<u32, SquadTemp>,
@@ -2977,6 +2992,107 @@ fn apply_property_event(
         apply_game_state_property(&mut state.game_state, context.property_name, decoded);
     }
 
+    // Track capture zone properties (flags)
+    if context.group_leaf == "SQCaptureZoneComponent"
+        || context.group_path.contains("SQCaptureZone")
+        || is_capture_zone_type(context.group_path)
+    {
+        if let Some(owner_actor_guid) = actor_guid {
+            let component_guid = context.sub_object_net_guid;
+            let builder = state
+                .capture_zone_builders
+                .entry(owner_actor_guid)
+                .or_insert_with(|| {
+                    // Try to get name from guid_to_path
+                    let name = state.guid_to_path.get(&owner_actor_guid).cloned();
+                    // Extract position from actor builder if available
+                    let actor = state.actor_builders.get(&owner_actor_guid);
+                    let (x, y, z) = actor
+                        .and_then(|a| a.initial_location)
+                        .map(|loc| (Some(loc.x), Some(loc.y), Some(loc.z)))
+                        .unwrap_or((None, None, None));
+                    CaptureZoneBuilder {
+                        actor_guid: owner_actor_guid,
+                        component_guid,
+                        name,
+                        x,
+                        y,
+                        z,
+                        initial_owning_team: None,
+                        events: Vec::new(),
+                    }
+                });
+
+            // Update component_guid if not set
+            if builder.component_guid.is_none() {
+                builder.component_guid = component_guid;
+            }
+
+            match context.property_name {
+                "OwningTeam" => {
+                    let team_id = decoded
+                        .int_packed
+                        .map(|v| v as i64)
+                        .or_else(|| decoded.int32.map(|v| v as i64));
+                    if builder.initial_owning_team.is_none() {
+                        builder.initial_owning_team = team_id;
+                    }
+                    if let Some(team) = team_id {
+                        builder.events.push(CaptureZoneEvent {
+                            t_ms: context.t_ms,
+                            second: (context.t_ms / 1000) as u32,
+                            event_type: "owning_team".to_string(),
+                            value_int: Some(team),
+                            value_float: None,
+                        });
+                    }
+                }
+                "CapturePercent" => {
+                    if let Some(percent) = decoded.float32 {
+                        builder.events.push(CaptureZoneEvent {
+                            t_ms: context.t_ms,
+                            second: (context.t_ms / 1000) as u32,
+                            event_type: "capture_percent".to_string(),
+                            value_int: None,
+                            value_float: Some(percent as f64),
+                        });
+                    }
+                }
+                "CapturePercentDirection" => {
+                    let direction = decoded
+                        .int_packed
+                        .map(|v| v as i64)
+                        .or_else(|| decoded.int32.map(|v| v as i64));
+                    if let Some(dir) = direction {
+                        builder.events.push(CaptureZoneEvent {
+                            t_ms: context.t_ms,
+                            second: (context.t_ms / 1000) as u32,
+                            event_type: "capture_direction".to_string(),
+                            value_int: Some(dir),
+                            value_float: None,
+                        });
+                    }
+                }
+                "CapturingTeam" => {
+                    let team_id = decoded
+                        .int_packed
+                        .map(|v| v as i64)
+                        .or_else(|| decoded.int32.map(|v| v as i64));
+                    if let Some(team) = team_id {
+                        builder.events.push(CaptureZoneEvent {
+                            t_ms: context.t_ms,
+                            second: (context.t_ms / 1000) as u32,
+                            event_type: "capturing_team".to_string(),
+                            value_int: Some(team),
+                            value_float: None,
+                        });
+                    }
+                }
+                _ => {}
+            }
+        }
+    }
+
     if context.classify_flags.is_soldier() && context.property_name == "ReplicatedMovement" {
         if let Some(movement) = &decoded.rep_movement {
             if let Some(location) = movement.location {
@@ -5214,6 +5330,38 @@ fn parse_data(
     let kills = finalize_kills(&state, &players);
     let (teams, squads, seat_changes) = finalize_roster_and_seats(&state, &mut players);
 
+    // Finalize capture zones
+    let capture_zones = state
+        .capture_zone_builders
+        .values()
+        .filter(|builder| !builder.events.is_empty() || builder.initial_owning_team.is_some())
+        .map(|builder| {
+            // Try to extract display name from path (e.g., "C1-Diefenbunker" from the path)
+            let display_name = builder
+                .name
+                .as_deref()
+                .and_then(|path| {
+                    // Extract the flag name from the path (last component before any suffixes)
+                    path.rsplit('/')
+                        .next()
+                        .and_then(|last| last.split('.').next())
+                        .filter(|name| !name.is_empty() && !name.starts_with("BP_"))
+                        .map(String::from)
+                });
+            CaptureZone {
+                actor_guid: builder.actor_guid,
+                component_guid: builder.component_guid,
+                name: builder.name.clone(),
+                display_name,
+                x: builder.x,
+                y: builder.y,
+                z: builder.z,
+                initial_owning_team: builder.initial_owning_team,
+                events: builder.events.clone(),
+            }
+        })
+        .collect::<Vec<_>>();
+
     string_inventory.class_paths.sort();
     string_inventory.ids.sort();
 
@@ -5339,6 +5487,7 @@ fn parse_data(
             component_states: state.component_state_events,
             vehicle_states: state.vehicle_state_events,
             weapon_states: state.weapon_state_events,
+            capture_zones,
             properties: state.property_events,
         },
         diagnostics: Diagnostics {
