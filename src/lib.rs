@@ -71,6 +71,8 @@ mod parser;
 pub mod sqrb;
 /// Read and write `.sqrj.json` (human-readable JSON) bundles.
 pub mod sqrj;
+/// Timeline format for Squad Replay Viewer (`.sqrt.json`).
+pub mod timeline;
 mod unreal_names;
 
 pub use bundle::{Bundle, GameStateInfo, ParseOptions};

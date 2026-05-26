@@ -7,9 +7,9 @@ use crate::bundle::{
     WeaponStateEvent,
 };
 use crate::classify::{
-    ClassifyFlags, classify_deployable_event_type, infer_component_type_name, infer_group_leaf,
-    is_capture_zone_type, is_deployable_primary_type, is_helicopter_type, is_vehicle_type,
-    normalize_type,
+    ClassifyFlags, classify_deployable_event_type, extract_raas_flag_from_path,
+    infer_component_type_name, infer_group_leaf, is_capture_zone_type,
+    is_deployable_primary_type, is_helicopter_type, is_vehicle_type, normalize_type,
 };
 use crate::error::{Error, Result};
 use crate::unreal_names::unreal_name;
@@ -219,10 +219,19 @@ struct RawSample {
     x: f64,
     y: f64,
     z: f64,
+    yaw: Option<f64>,
 }
 
 #[derive(Debug, Clone, Default)]
 struct HelicopterMovementSample {
+    t_ms: u64,
+    actor_guid: u32,
+    payload_bits: u32,
+    movement: RepMovement,
+}
+
+#[derive(Debug, Clone, Default)]
+struct VehicleMovementComponentSample {
     t_ms: u64,
     actor_guid: u32,
     payload_bits: u32,
@@ -264,6 +273,9 @@ const HELO_Z_BOUND: f64 = 30_000.0;
 const HELO_DECODE_PADDING_BYTES: usize = 4;
 const HELO_PRIMARY_PAYLOAD_BITS: u32 = 141;
 const HELO_NON_PRIMARY_LOCAL_MIN_ABS: f64 = 1200.0;
+const VEHICLE_SPEED_THRESHOLD: f64 = 35_000.0;
+const VEHICLE_WORLD_BOUND: f64 = 400_000.0;
+const VEHICLE_Z_BOUND: f64 = 30_000.0;
 
 #[derive(Debug, Clone, Default)]
 struct PartialBunch {
@@ -308,6 +320,8 @@ struct ParseState {
     seat_meta_by_guid: U32HashMap<SeatMeta>,
     seat_change_candidates: Vec<SeatChangeCandidate>,
     seen_seat_keys: HashSet<SeenSeatKey>,
+    /// Active lane capture zone flags (e.g., "C1-Diefenbunker") extracted from raw replay.
+    active_lane_flags: HashSet<String>,
     kill_states: U32HashMap<DeathState>,
     kill_candidates: Vec<KillCandidate>,
     kill_dedup: HashSet<(u64, u32, bool)>,
@@ -328,6 +342,7 @@ struct ParseState {
     weapon_state_events: Vec<WeaponStateEvent>,
     raw_player_samples: Vec<RawSample>,
     raw_vehicle_samples: Vec<RawSample>,
+    raw_vehicle_component_samples: Vec<VehicleMovementComponentSample>,
     raw_helicopter_samples: Vec<HelicopterMovementSample>,
     in_packet_id: u32,
     in_reliable: u32,
@@ -1246,6 +1261,54 @@ impl BitReader {
 
 fn round2(value: f64) -> f64 {
     (value * 100.0).round() / 100.0
+}
+
+fn infer_hull_class_from_child(class_name: &str) -> Option<String> {
+    let normalized = normalize_type(class_name)?;
+    let stripped = normalized
+        .trim_start_matches("BP_")
+        .trim_end_matches("_C");
+    let candidate = stripped.split('_').next().unwrap_or(stripped).trim();
+    (!candidate.is_empty()).then(|| candidate.to_string())
+}
+
+/// Extract active lane capture zone flags from raw replay data.
+/// Looks for flag names (e.g., "C1-Diefenbunker") that appear near "DefaultSceneRoot".
+/// Returns a HashSet of flag names.
+fn extract_active_lane_flags(data: &[u8]) -> HashSet<String> {
+    let mut flags = HashSet::new();
+    
+    // Convert to string, keeping only ASCII printable characters
+    let text: String = data.iter()
+        .map(|&b| if b >= 0x20 && b < 0x7F { b as char } else { ' ' })
+        .collect();
+    
+    // Find all occurrences of "DefaultSceneRoot" and look backwards for flag names
+    let marker = "DefaultSceneRoot";
+    let flag_re = regex::Regex::new(r"([A-Z][0-9]-[A-Za-z]{3,})").unwrap();
+    
+    let mut search_start = 0;
+    while let Some(pos) = text[search_start..].find(marker) {
+        let abs_pos = search_start + pos;
+        // Look back up to 100 chars for a flag name
+        let look_back_start = abs_pos.saturating_sub(100);
+        let look_back_region = &text[look_back_start..abs_pos];
+        
+        // Find the last flag pattern before DefaultSceneRoot
+        if let Some(cap) = flag_re.captures_iter(look_back_region).last() {
+            if let Some(flag_match) = cap.get(1) {
+                let name = flag_match.as_str().to_string();
+                // Skip CaptureZoneCluster entries
+                if !name.contains("CaptureZoneCluster") {
+                    flags.insert(name);
+                }
+            }
+        }
+        
+        search_start = abs_pos + marker.len();
+    }
+    
+    flags
 }
 
 fn remove_path_prefix(path: &str, prefix: &str) -> String {
@@ -2753,6 +2816,13 @@ fn apply_property_event(
     // Keep the raw event and update the derived views we build from it.
     let actor_guid = context.actor.map(|value| value.actor_net_guid.value);
     let is_helicopter_movement_component = context.group_leaf == "SQHelicopterMovementComponent";
+    let is_vehicle_movement_component = matches!(
+        context.group_leaf,
+        "SQWheeledVehicleMovementComponent"
+            | "SQTrackedVehicleMovementComponent"
+            | "SQMovementComponentManager"
+    );
+    let has_vehicle_path_hint = context.group_path.contains("/Game/Vehicles/");
 
     if let Some(channel_actor_guid) = actor_guid {
         let builder = state
@@ -3093,20 +3163,36 @@ fn apply_property_event(
         }
     }
 
-    if context.classify_flags.is_soldier() && context.property_name == "ReplicatedMovement" {
+    if context.property_name == "ReplicatedMovement" {
         if let Some(movement) = &decoded.rep_movement {
             if let Some(location) = movement.location {
-                state.raw_player_samples.push(RawSample {
-                    t_ms: context.t_ms,
-                    actor_guid,
-                    player_state_guid: None,
-                    key: None,
-                    class_name: Some(context.group_leaf.to_string()),
-                    x: location.x,
-                    y: location.y,
-                    z: location.z,
-                });
+                let mapped_player_state_guid = actor_guid
+                    .and_then(|guid| state.player_actor_to_state.get(&guid).copied());
+                if context.classify_flags.is_soldier() || mapped_player_state_guid.is_some() {
+                    state.raw_player_samples.push(RawSample {
+                        t_ms: context.t_ms,
+                        actor_guid,
+                        player_state_guid: mapped_player_state_guid,
+                        key: None,
+                        class_name: Some(context.group_leaf.to_string()),
+                        x: location.x,
+                        y: location.y,
+                        z: location.z,
+                        yaw: movement.rotation.map(|r| r.yaw),
+                    });
+                }
             }
+        }
+    }
+
+    if context.property_name == "PlayerState" {
+        if let (Some(soldier_actor_guid), Some(player_state_guid)) = (
+            actor_guid,
+            decoded_scalar_u32(decoded).filter(|guid| *guid != 0),
+        ) {
+            state
+                .player_actor_to_state
+                .insert(soldier_actor_guid, player_state_guid);
         }
     }
 
@@ -3129,15 +3215,34 @@ fn apply_property_event(
     }
 
     if !is_helicopter_movement_component
-        && context.classify_flags.is_vehicle()
         && context.property_name == "ReplicatedMovement"
+        && (context.classify_flags.is_vehicle()
+            || is_vehicle_movement_component
+            || has_vehicle_path_hint)
     {
         if let Some(movement) = &decoded.rep_movement {
             if let Some(location) = movement.location {
+                let inferred_class_name = actor_guid.and_then(|owner_actor_guid| {
+                    state.actor_builders.get(&owner_actor_guid).and_then(|builder| {
+                        builder.class_name.clone().or_else(|| {
+                            builder
+                                .archetype_path
+                                .as_deref()
+                                .and_then(normalize_type)
+                        })
+                    })
+                });
+
                 // Use actor_guid if available, otherwise fall back to channel_index
                 // to uniquely identify vehicles that existed before recording started.
                 let effective_guid = actor_guid.unwrap_or(context.channel_index);
-                let key = format!("{}_{effective_guid}", context.group_leaf);
+                let fallback_class_name = normalize_type(context.group_path)
+                    .or_else(|| normalize_type(context.group_leaf))
+                    .unwrap_or_else(|| context.group_leaf.to_string());
+                let key_stem = inferred_class_name
+                    .as_deref()
+                    .unwrap_or(&fallback_class_name);
+                let key = format!("{key_stem}_{effective_guid}");
                 
                 // Create an actor builder entry for vehicles without opened actors.
                 // This ensures they appear in the output even if never formally opened.
@@ -3165,17 +3270,32 @@ fn apply_property_event(
                             notes: vec!["synthetic_from_channel".to_string()],
                         });
                 }
-                
-                state.raw_vehicle_samples.push(RawSample {
-                    t_ms: context.t_ms,
-                    actor_guid: Some(effective_guid),
-                    player_state_guid: None,
-                    key: Some(key),
-                    class_name: Some(context.group_leaf.to_string()),
-                    x: location.x,
-                    y: location.y,
-                    z: location.z,
-                });
+
+                let is_component_transform = context
+                    .sub_object_net_guid
+                    .is_some_and(|sub_guid| Some(sub_guid) != actor_guid);
+
+                if is_component_transform {
+                    state.raw_vehicle_component_samples.push(VehicleMovementComponentSample {
+                        t_ms: context.t_ms,
+                        actor_guid: effective_guid,
+                        payload_bits: decoded.bits,
+                        movement: movement.as_ref().clone(),
+                    });
+                } else {
+                    state.raw_vehicle_samples.push(RawSample {
+                        t_ms: context.t_ms,
+                        actor_guid: Some(effective_guid),
+                        player_state_guid: None,
+                        key: Some(key),
+                        class_name: inferred_class_name
+                            .or(Some(fallback_class_name)),
+                        x: location.x,
+                        y: location.y,
+                        z: location.z,
+                        yaw: movement.rotation.map(|r| r.yaw),
+                    });
+                }
             }
         }
     }
@@ -4321,6 +4441,11 @@ struct HelicopterTrackReconstruction {
     accepted_samples: Vec<TrackSample3>,
 }
 
+#[derive(Debug, Clone, Default)]
+struct VehicleTrackReconstruction {
+    accepted_samples: Vec<TrackSample3>,
+}
+
 fn helicopter_track_prefix(class_name: Option<&str>, archetype_path: Option<&str>) -> &'static str {
     let hint = class_name
         .or(archetype_path)
@@ -4444,6 +4569,7 @@ fn reconstruct_anchored_helicopter_track(
             x: round2(world_x),
             y: round2(world_y),
             z: round2(world_z),
+            yaw: sample.movement.rotation.map(|r| r.yaw),
         });
         last_world = Some((sample.t_ms, world_x, world_y, world_z));
     }
@@ -4459,10 +4585,82 @@ fn reconstruct_anchored_helicopter_track(
             x: round2(anchor.x),
             y: round2(anchor.y),
             z: round2(anchor.z),
+            yaw: actor.initial_rotation.map(|r| r.yaw),
         },
     );
 
     Some(HelicopterTrackReconstruction { accepted_samples })
+}
+
+fn reconstruct_anchored_vehicle_track(
+    actor: &ActorBuilder,
+    samples: &[VehicleMovementComponentSample],
+) -> Option<VehicleTrackReconstruction> {
+    let anchor = actor.initial_location?;
+    if samples.is_empty() {
+        return None;
+    }
+
+    let mut ordered = samples.to_vec();
+    ordered.sort_by_key(|sample| sample.t_ms);
+    let first_local = ordered.iter().find_map(|sample| sample.movement.location)?;
+
+    let mut accepted_samples = Vec::new();
+    let mut last_world: Option<(u64, f64, f64, f64)> = None;
+
+    for sample in ordered {
+        let Some(local) = sample.movement.location else {
+            continue;
+        };
+
+        let world_x = anchor.x + local.x - first_local.x;
+        let world_y = anchor.y + local.y - first_local.y;
+        let world_z = anchor.z + local.z - first_local.z;
+
+        if let Some((last_t_ms, last_x, last_y, last_z)) = last_world {
+            let dt_ms = sample.t_ms.saturating_sub(last_t_ms);
+            if dt_ms > 0 {
+                let dt_seconds = dt_ms as f64 / 1000.0;
+                let dx = world_x - last_x;
+                let dy = world_y - last_y;
+                let dz = world_z - last_z;
+                let speed = (dx * dx + dy * dy + dz * dz).sqrt() / dt_seconds;
+                if speed > VEHICLE_SPEED_THRESHOLD
+                    || world_x.abs() > VEHICLE_WORLD_BOUND
+                    || world_y.abs() > VEHICLE_WORLD_BOUND
+                    || world_z.abs() > VEHICLE_Z_BOUND
+                {
+                    continue;
+                }
+            }
+        }
+
+        accepted_samples.push(TrackSample3 {
+            t_ms: sample.t_ms,
+            x: round2(world_x),
+            y: round2(world_y),
+            z: round2(world_z),
+            yaw: sample.movement.rotation.map(|r| r.yaw),
+        });
+        last_world = Some((sample.t_ms, world_x, world_y, world_z));
+    }
+
+    if accepted_samples.is_empty() {
+        return None;
+    }
+
+    accepted_samples.insert(
+        0,
+        TrackSample3 {
+            t_ms: actor.open_time_ms,
+            x: round2(anchor.x),
+            y: round2(anchor.y),
+            z: round2(anchor.z),
+            yaw: actor.initial_rotation.map(|r| r.yaw),
+        },
+    );
+
+    Some(VehicleTrackReconstruction { accepted_samples })
 }
 
 /// Compute visibility windows from position sample timestamps.
@@ -4491,7 +4689,7 @@ fn finalize_tracks(
     duration_ms: u64,
 ) -> (TrackGroups, HashMap<String, Vec<crate::bundle::VisibilityWindow>>) {
     let mut player_state_to_name = HashMap::new();
-    let mut actor_to_player_state = HashMap::new();
+    let mut actor_to_player_state = state.player_actor_to_state.clone();
 
     for player in state.player_builders.values() {
         if let Some(name) = &player.name {
@@ -4526,6 +4724,7 @@ fn finalize_tracks(
                 x: round2(sample.x),
                 y: round2(sample.y),
                 z: round2(sample.z),
+                yaw: sample.yaw,
             });
     }
 
@@ -4554,17 +4753,74 @@ fn finalize_tracks(
         }
     }
 
+    let probable_vehicle_hulls: HashSet<u32> = state
+        .actor_builders
+        .values()
+        .filter_map(|actor| {
+            let child_type = actor
+                .class_name
+                .as_deref()
+                .or(actor.archetype_path.as_deref())
+                .unwrap_or_default();
+            let owner_guid = actor.owner?;
+            if owner_guid == actor.actor_guid || !is_vehicle_type(child_type) {
+                return None;
+            }
+            Some(owner_guid)
+        })
+        .collect();
+
     let mut vehicle_tracks_map: HashMap<String, VehicleTrackEntry> = HashMap::new();
     for sample in &state.raw_vehicle_samples {
-        let key = sample.key.clone().unwrap_or_else(|| "vehicle".to_string());
+        let mut actor_guid = sample.actor_guid;
+        let mut class_name = sample.class_name.clone();
+
+        if let Some(child_guid) = sample.actor_guid {
+            if let Some(child_actor) = state.actor_builders.get(&child_guid) {
+                if let Some(owner_guid) = child_actor.owner {
+                    // Vehicle weapons/turrets frequently replicate movement while
+                    // the owning hull GUID never opens as an actor. Re-attach those
+                    // samples to the owner GUID so the timeline can render the hull.
+                    if probable_vehicle_hulls.contains(&owner_guid) {
+                        actor_guid = Some(owner_guid);
+                        class_name = state
+                            .actor_builders
+                            .get(&owner_guid)
+                            .and_then(|owner_actor| {
+                                owner_actor.class_name.clone().or_else(|| {
+                                    owner_actor
+                                        .archetype_path
+                                        .as_deref()
+                                        .and_then(normalize_type)
+                                })
+                            })
+                            .or_else(|| {
+                                sample
+                                    .class_name
+                                    .as_deref()
+                                    .and_then(infer_hull_class_from_child)
+                            });
+                    }
+                }
+            }
+        }
+
+        let key = actor_guid
+            .map(|guid| {
+                let stem = class_name.as_deref().unwrap_or("vehicle");
+                format!("{stem}_{guid}")
+            })
+            .or_else(|| sample.key.clone())
+            .unwrap_or_else(|| "vehicle".to_string());
         let entry = vehicle_tracks_map
             .entry(key.clone())
-            .or_insert_with(|| (sample.actor_guid, sample.class_name.clone(), Vec::new()));
+            .or_insert_with(|| (actor_guid, class_name.clone(), Vec::new()));
         entry.2.push(TrackSample3 {
             t_ms: sample.t_ms,
             x: round2(sample.x),
             y: round2(sample.y),
             z: round2(sample.z),
+            yaw: sample.yaw,
         });
     }
 
@@ -4577,7 +4833,17 @@ fn finalize_tracks(
             .push(sample.clone());
     }
 
+    let mut vehicle_component_samples: HashMap<u32, Vec<VehicleMovementComponentSample>> =
+        HashMap::new();
+    for sample in &state.raw_vehicle_component_samples {
+        vehicle_component_samples
+            .entry(sample.actor_guid)
+            .or_default()
+            .push(sample.clone());
+    }
+
     let mut direct_helicopter_actor_guids = HashSet::new();
+    let mut anchored_vehicle_actor_guids = HashSet::new();
     let mut vehicles = Vec::new();
     let mut helicopters = Vec::new();
 
@@ -4587,7 +4853,41 @@ fn finalize_tracks(
             .as_deref()
             .or(actor.archetype_path.as_deref())
             .unwrap_or_default();
-        if !is_vehicle_type(type_name) || !is_helicopter_type(type_name) {
+        if !is_vehicle_type(type_name) || is_helicopter_type(type_name) {
+            continue;
+        }
+
+        let Some(samples) = vehicle_component_samples.get(&actor.actor_guid) else {
+            continue;
+        };
+        let Some(reconstruction) = reconstruct_anchored_vehicle_track(actor, samples) else {
+            continue;
+        };
+
+        anchored_vehicle_actor_guids.insert(actor.actor_guid);
+        let key_stem = actor
+            .class_name
+            .as_deref()
+            .or(actor.archetype_path.as_deref())
+            .and_then(normalize_type)
+            .unwrap_or_else(|| "vehicle".to_string());
+        vehicles.push(Track3 {
+            key: format!("{key_stem}_{}", actor.actor_guid),
+            actor_guid: Some(actor.actor_guid),
+            player_state_guid: None,
+            class_name: actor.class_name.clone(),
+            source: "movement_component_anchored".to_string(),
+            samples: reconstruction.accepted_samples,
+        });
+    }
+
+    for actor in state.actor_builders.values() {
+        let type_name = actor
+            .class_name
+            .as_deref()
+            .or(actor.archetype_path.as_deref())
+            .unwrap_or_default();
+        if !is_helicopter_type(type_name) {
             continue;
         }
 
@@ -4615,6 +4915,9 @@ fn finalize_tracks(
 
     let mut fallback_helicopter_actor_guids = HashSet::new();
     for (key, (actor_guid, class_name, mut samples)) in vehicle_tracks_map {
+        if actor_guid.is_some_and(|guid| anchored_vehicle_actor_guids.contains(&guid)) {
+            continue;
+        }
         samples.sort_by_key(|sample| sample.t_ms);
         let is_helicopter = class_name
             .as_deref()
@@ -4659,7 +4962,7 @@ fn finalize_tracks(
             .as_deref()
             .or(actor.archetype_path.as_deref())
             .unwrap_or_default();
-        if !is_vehicle_type(type_name) || !is_helicopter_type(type_name) {
+        if !is_helicopter_type(type_name) {
             continue;
         }
         if direct_helicopter_actor_guids.contains(&actor.actor_guid)
@@ -5093,8 +5396,12 @@ fn parse_replay_stream(
     replay_data_chunks: &[ReplayDataChunk],
     retain_property_events: bool,
 ) -> ParseState {
+    // Extract active lane flags from raw replay data before parsing
+    let active_lane_flags = extract_active_lane_flags(data);
+    
     let mut state = ParseState {
         retain_property_events,
+        active_lane_flags,
         ..ParseState::default()
     };
 
@@ -5189,6 +5496,7 @@ fn parse_data(
     state.property_events.shrink_to_fit();
     state.raw_player_samples.shrink_to_fit();
     state.raw_vehicle_samples.shrink_to_fit();
+    state.raw_vehicle_component_samples.shrink_to_fit();
     state.raw_helicopter_samples.shrink_to_fit();
 
     let duration_ms = outer.length_in_ms as u64;
@@ -5271,11 +5579,68 @@ fn parse_data(
             notes: builder.notes.clone(),
         })
         .collect::<Vec<_>>();
+
+    let mut known_actor_guids: HashSet<u32> = actor_entities
+        .iter()
+        .map(|actor| actor.actor_guid)
+        .collect();
+
+    for track in tracks.vehicles.iter().chain(tracks.helicopters.iter()) {
+        let Some(actor_guid) = track.actor_guid else {
+            continue;
+        };
+        if known_actor_guids.contains(&actor_guid) {
+            continue;
+        }
+        let Some(first) = track.samples.first() else {
+            continue;
+        };
+
+        actor_entities.push(ActorEntity {
+            actor_guid,
+            channel_index: actor_guid,
+            class_name: track.class_name.clone(),
+            archetype_path: track.class_name.clone(),
+            open_time_ms: first.t_ms,
+            close_time_ms: None,
+            initial_location: Some(Vec3 {
+                x: first.x,
+                y: first.y,
+                z: first.z,
+            }),
+            initial_rotation: first.yaw.map(|yaw| Rotator {
+                pitch: 0.0,
+                yaw,
+                roll: 0.0,
+            }),
+            team: None,
+            build_state: None,
+            health: None,
+            owner: None,
+            notes: vec!["synthetic_from_track_owner_remap".to_string()],
+        });
+        known_actor_guids.insert(actor_guid);
+    }
+
     actor_entities.sort_by_key(|actor| actor.open_time_ms);
 
     let mut vehicles = Vec::new();
     let mut helicopters = Vec::new();
     let mut deployables = Vec::new();
+
+    // Keep actor classification aligned with finalized tracks. Some vehicle hull
+    // actors replicate movement but expose generic class paths, so class-name-only
+    // classification can miss them.
+    let tracked_vehicle_actor_guids: HashSet<u32> = tracks
+        .vehicles
+        .iter()
+        .filter_map(|track| track.actor_guid)
+        .collect();
+    let tracked_helicopter_actor_guids: HashSet<u32> = tracks
+        .helicopters
+        .iter()
+        .filter_map(|track| track.actor_guid)
+        .collect();
 
     for actor in actor_entities {
         let type_name = actor
@@ -5285,11 +5650,14 @@ fn parse_data(
             .unwrap_or_default()
             .to_string();
 
+        let hinted_vehicle = tracked_vehicle_actor_guids.contains(&actor.actor_guid);
+        let hinted_helicopter = tracked_helicopter_actor_guids.contains(&actor.actor_guid);
+
         if is_deployable_primary_type(&type_name) {
             deployables.push(actor);
-        } else if is_vehicle_type(&type_name) && is_helicopter_type(&type_name) {
+        } else if hinted_helicopter || is_helicopter_type(&type_name) {
             helicopters.push(actor);
-        } else if is_vehicle_type(&type_name) {
+        } else if hinted_vehicle || is_vehicle_type(&type_name) {
             vehicles.push(actor);
         }
     }
@@ -5331,7 +5699,7 @@ fn parse_data(
     let (teams, squads, seat_changes) = finalize_roster_and_seats(&state, &mut players);
 
     // Finalize capture zones
-    let capture_zones = state
+    let mut capture_zones = state
         .capture_zone_builders
         .values()
         .filter(|builder| !builder.events.is_empty() || builder.initial_owning_team.is_some())
@@ -5361,6 +5729,32 @@ fn parse_data(
             }
         })
         .collect::<Vec<_>>();
+    
+    // Add capture zones for active lane flags (extracted from raw replay data)
+    // These are the flags that were selected for this specific match
+    let existing_names: std::collections::HashSet<String> = capture_zones
+        .iter()
+        .filter_map(|z| z.display_name.clone().or(z.name.clone()))
+        .collect();
+    
+    for flag_name in &state.active_lane_flags {
+        // Skip if we already have this flag from property events
+        if existing_names.contains(flag_name) {
+            continue;
+        }
+        // Create a capture zone entry for this active flag
+        capture_zones.push(CaptureZone {
+            actor_guid: 0, // No actor GUID available from raw extraction
+            component_guid: None,
+            name: Some(flag_name.clone()),
+            display_name: Some(flag_name.clone()),
+            x: None,
+            y: None,
+            z: None,
+            initial_owning_team: None,
+            events: Vec::new(),
+        });
+    }
 
     string_inventory.class_paths.sort();
     string_inventory.ids.sort();
@@ -5498,7 +5892,8 @@ fn parse_data(
             guid_to_path_size: state.guid_to_path.len(),
             property_replications: state.property_replications,
             position_samples: state.raw_player_samples.len() as u64,
-            vehicle_position_samples: state.raw_vehicle_samples.len() as u64,
+            vehicle_position_samples: (state.raw_vehicle_samples.len()
+                + state.raw_vehicle_component_samples.len()) as u64,
             replay_data_chunks: replay_chunk_count,
             warnings: state.warnings,
             string_inventory,

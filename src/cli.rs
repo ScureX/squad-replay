@@ -1,7 +1,7 @@
 use clap::{Parser, Subcommand};
 use serde::Serialize;
 use squadreplay::bundle::Bundle;
-use squadreplay::{Error, ParseOptions, Result, compat, parse_file, read_bundle, sqrb, sqrj};
+use squadreplay::{Error, ParseOptions, Result, compat, parse_file, read_bundle, sqrb, sqrj, timeline};
 use std::fs::{self, File};
 use std::io::{BufWriter, Write};
 use std::path::{Path, PathBuf};
@@ -75,9 +75,9 @@ enum Command {
         #[arg(
             long,
             short = 'f',
-            default_value = "sqrj",
+            default_value = "sqrt",
             value_name = "FORMATS",
-            help = "Formats to write: sqrj, sqrb, or a comma-separated list"
+            help = "Formats to write: sqrt (viewer), sqrj, sqrb, or comma-separated list"
         )]
         format: String,
         #[arg(
@@ -140,12 +140,14 @@ enum Command {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum OutputFormat {
+    Sqrt,
     Sqrj,
     Sqrb,
 }
 
 #[derive(Debug, Clone, Default)]
 struct OutputSelection {
+    sqrt: bool,
     sqrj: bool,
     sqrb: bool,
 }
@@ -156,12 +158,13 @@ impl OutputSelection {
         for part in input.split(',').map(|s| s.trim().to_ascii_lowercase()) {
             match part.as_str() {
                 "" => {}
+                "sqrt" => out.sqrt = true,
                 "sqrj" => out.sqrj = true,
                 "sqrb" => out.sqrb = true,
                 other => return Err(format!("unsupported format `{other}`")),
             }
         }
-        if !out.sqrj && !out.sqrb {
+        if !out.sqrt && !out.sqrj && !out.sqrb {
             return Err("at least one format must be selected".to_string());
         }
         Ok(out)
@@ -169,6 +172,9 @@ impl OutputSelection {
 
     fn iter(&self) -> std::vec::IntoIter<OutputFormat> {
         let mut formats = Vec::new();
+        if self.sqrt {
+            formats.push(OutputFormat::Sqrt);
+        }
         if self.sqrj {
             formats.push(OutputFormat::Sqrj);
         }
@@ -181,6 +187,7 @@ impl OutputSelection {
 
 #[derive(Debug, Clone, Default)]
 struct WrittenOutputs {
+    sqrt: Option<PathBuf>,
     sqrj: Option<PathBuf>,
     sqrb: Option<PathBuf>,
     compat_json: Option<PathBuf>,
@@ -233,6 +240,7 @@ fn path_text(path: &Path) -> String {
 
 fn written_outputs_json(written: &WrittenOutputs) -> serde_json::Value {
     serde_json::json!({
+        "sqrt": written.sqrt.as_deref().map(path_text),
         "sqrj": written.sqrj.as_deref().map(path_text),
         "sqrb": written.sqrb.as_deref().map(path_text),
         "compat_json": written.compat_json.as_deref().map(path_text),
@@ -259,6 +267,12 @@ fn write_outputs(
     let mut written = WrittenOutputs::default();
     for format in formats.iter() {
         match format {
+            OutputFormat::Sqrt => {
+                let path = output_path_with_suffix(output_base, ".sqrt.json");
+                let tl = timeline::build_timeline(bundle, None, &timeline::TimelineOptions::default());
+                timeline::write_timeline(&tl, &path)?;
+                written.sqrt = Some(path);
+            }
             OutputFormat::Sqrj => {
                 let path = output_path_with_suffix(output_base, ".sqrj.json");
                 sqrj::write(bundle, &path)?;
@@ -366,6 +380,9 @@ fn render_summary_text(title: &str, summary: &BundleSummary<'_>) -> String {
 fn render_written_outputs(written: &WrittenOutputs) -> Vec<String> {
     let mut lines = Vec::new();
 
+    if let Some(path) = written.sqrt.as_ref() {
+        lines.push(format!("  - {}", path_text(path)));
+    }
     if let Some(path) = written.sqrj.as_ref() {
         lines.push(format!("  - {}", path_text(path)));
     }
@@ -567,6 +584,7 @@ mod tests {
                 component_states: vec![ComponentStateEvent::default(); 5],
                 vehicle_states: vec![VehicleStateEvent::default(); 7],
                 weapon_states: vec![WeaponStateEvent::default(); 4],
+                capture_zones: vec![],
                 properties: vec![Default::default(); 125],
             },
             diagnostics: Diagnostics {

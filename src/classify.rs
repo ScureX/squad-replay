@@ -397,9 +397,105 @@ pub fn infer_group_leaf(path: &str) -> &str {
     path
 }
 
+/// Try to extract a RAAS/AAS flag name from a path string.
+/// Looks for patterns like "C1-Diefenbunker", "B3-CityCenter" etc.
+/// Returns Some((lane_letter, lane_number, display_name)) if found.
+/// 
+/// Only returns flags that appear to be active (instantiated with DefaultSceneRoot).
+pub fn extract_raas_flag_from_path(path: &str) -> Option<(char, u8, String)> {
+    // Only extract flags that are actual scene instances (have DefaultSceneRoot)
+    // This filters out inactive lane flags that are just map data references
+    if !path.contains("DefaultSceneRoot") {
+        return None;
+    }
+    
+    // Look for patterns after "PersistentLevel"
+    let after_level = if let Some(idx) = path.find("PersistentLevel") {
+        &path[idx + "PersistentLevel".len()..]
+    } else {
+        path
+    };
+    
+    // Pattern: single letter (A-Z) followed by digit followed by hyphen followed by name
+    // e.g., "C1-Diefenbunker", "B3-CityCenter", "A2-Village"
+    let chars: Vec<char> = after_level.chars().collect();
+    if chars.len() < 4 {
+        return None;
+    }
+    
+    // First char must be A-Z
+    let lane_letter = chars[0];
+    if !lane_letter.is_ascii_uppercase() {
+        return None;
+    }
+    
+    // Second char must be digit
+    let lane_digit = chars[1];
+    if !lane_digit.is_ascii_digit() {
+        return None;
+    }
+    let lane_number = lane_digit.to_digit(10)? as u8;
+    
+    // Third char must be hyphen
+    if chars[2] != '-' {
+        return None;
+    }
+    
+    // Extract the flag name (everything after the hyphen until special chars or end)
+    let name_start = 3;
+    let mut name_end = chars.len();
+    for (i, c) in chars[name_start..].iter().enumerate() {
+        if *c == '?' || *c == '.' || *c == '/' || !c.is_ascii_alphanumeric() {
+            name_end = name_start + i;
+            break;
+        }
+    }
+    
+    if name_end <= name_start {
+        return None;
+    }
+    
+    let flag_name: String = chars[name_start..name_end].iter().collect();
+    let display_name = format!("{}{}-{}", lane_letter, lane_number, flag_name);
+    
+    Some((lane_letter, lane_number, display_name))
+}
+
+/// Check if a path contains a RAAS/AAS capture zone flag reference.
+pub fn is_raas_flag_path(path: &str) -> bool {
+    extract_raas_flag_from_path(path).is_some()
+}
+
 #[cfg(test)]
 mod tests {
-    use super::{infer_component_type, is_helicopter_type, is_vehicle_type};
+    use super::{infer_component_type, is_helicopter_type, is_vehicle_type, extract_raas_flag_from_path};
+
+    #[test]
+    fn raas_flag_extraction_works() {
+        // Test with full path containing DefaultSceneRoot (active flag)
+        let result = extract_raas_flag_from_path(
+            "/Game/Maps/Manicouagan/PersistentLevelC1-Diefenbunker?DefaultSceneRoot"
+        );
+        assert!(result.is_some());
+        let (lane, num, name) = result.unwrap();
+        assert_eq!(lane, 'C');
+        assert_eq!(num, 1);
+        assert_eq!(name, "C1-Diefenbunker");
+        
+        // Test with another active flag
+        let result = extract_raas_flag_from_path("PersistentLevelB3-Village?DefaultSceneRoot?SQCaptureZone");
+        assert!(result.is_some());
+        let (lane, num, name) = result.unwrap();
+        assert_eq!(lane, 'B');
+        assert_eq!(num, 3);
+        assert_eq!(name, "B3-Village");
+        
+        // Test non-flag paths (no DefaultSceneRoot = inactive, not extracted)
+        assert!(extract_raas_flag_from_path("PersistentLevel00-Team1Main").is_none());
+        assert!(extract_raas_flag_from_path("/Script/Squad.SQCaptureZone").is_none());
+        // Inactive lane flags (no DefaultSceneRoot) should not be extracted
+        assert!(extract_raas_flag_from_path("PersistentLevelA1-LoggingCamp").is_none());
+    }
 
     #[test]
     fn vehicle_seat_components_are_classified_as_seats() {

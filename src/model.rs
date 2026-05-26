@@ -243,6 +243,8 @@ pub struct TrackSample3 {
     pub x: f64,
     pub y: f64,
     pub z: f64,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub yaw: Option<f64>,
 }
 
 /// A named position track (series of [`TrackSample3`] samples).
