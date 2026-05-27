@@ -890,7 +890,9 @@ fn build_capture_zones(zones: &[CaptureZone]) -> Vec<TimelineCaptureZone> {
                 .filter(|e| e.event_type == "owning_team")
                 .map(|e| TimelineCaptureEvent {
                     t: e.t_ms,
-                    owner: e.value_int.map(|v| normalize_team_id(v as u32)),
+                    // OwningTeam raw uint8: 0=neutral, 1=Team1, 2=Team2
+                    // Already 1-indexed, no normalize_team_id needed.
+                    owner: e.value_int.map(|v| v as u32),
                 })
                 .collect();
 

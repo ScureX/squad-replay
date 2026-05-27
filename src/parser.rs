@@ -2815,7 +2815,9 @@ fn apply_property_event(
 ) {
     // Keep the raw event and update the derived views we build from it.
     let actor_guid = context.actor.map(|value| value.actor_net_guid.value);
+
     let is_helicopter_movement_component = context.group_leaf == "SQHelicopterMovementComponent";
+
     let is_vehicle_movement_component = matches!(
         context.group_leaf,
         "SQWheeledVehicleMovementComponent"
@@ -3100,10 +3102,25 @@ fn apply_property_event(
 
             match context.property_name {
                 "OwningTeam" => {
-                    let team_id = decoded
-                        .int_packed
-                        .map(|v| v as i64)
-                        .or_else(|| decoded.int32.map(|v| v as i64));
+                    // OwningTeam is a uint8 (0=neutral, 1=Team1, 2=Team2).
+                    // The packed int decoder fails for odd byte values (LSB=1
+                    // triggers "continue" flag). Reconstruct the raw byte:
+                    // - packed=Some(v) → raw = v*2 (even bytes: 0, 2, 4...)
+                    // - packed=None + bool=true → raw = 1 (odd byte with LSB=1)
+                    let team_id: Option<i64> = if decoded.bits == 8 {
+                        if let Some(v) = decoded.int_packed {
+                            Some((v as i64) * 2)
+                        } else if decoded.boolean == Some(true) {
+                            Some(1)
+                        } else {
+                            None
+                        }
+                    } else {
+                        decoded
+                            .int_packed
+                            .map(|v| v as i64)
+                            .or_else(|| decoded.int32.map(|v| v as i64))
+                    };
                     if builder.initial_owning_team.is_none() {
                         builder.initial_owning_team = team_id;
                     }
@@ -3144,10 +3161,21 @@ fn apply_property_event(
                     }
                 }
                 "CapturingTeam" => {
-                    let team_id = decoded
-                        .int_packed
-                        .map(|v| v as i64)
-                        .or_else(|| decoded.int32.map(|v| v as i64));
+                    // Same uint8 decode fix as OwningTeam
+                    let team_id: Option<i64> = if decoded.bits == 8 {
+                        if let Some(v) = decoded.int_packed {
+                            Some((v as i64) * 2)
+                        } else if decoded.boolean == Some(true) {
+                            Some(1)
+                        } else {
+                            None
+                        }
+                    } else {
+                        decoded
+                            .int_packed
+                            .map(|v| v as i64)
+                            .or_else(|| decoded.int32.map(|v| v as i64))
+                    };
                     if let Some(team) = team_id {
                         builder.events.push(CaptureZoneEvent {
                             t_ms: context.t_ms,
@@ -3684,6 +3712,8 @@ fn guess_stable_subobject_rep_object(
         || leaf.contains("tailrotor_bladescollision")
     {
         Some("/Script/Squad.SQRotorBladesComponent".to_string())
+    } else if leaf == "sqcapturezone" || leaf.contains("sqcapturezone") {
+        Some("/Script/Squad.SQCaptureZoneComponent".to_string())
     } else if leaf.contains("trackleftcomponent") || leaf.contains("trackrightcomponent") {
         Some("/Script/Squad.SQVehicleTrack".to_string())
     } else if leaf.starts_with("wheel_") || leaf.contains("wheelcomponent") {
