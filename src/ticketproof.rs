@@ -30,6 +30,15 @@ pub struct TicketProof {
     pub events: Vec<TicketEvent>,
     pub statistics: TicketStatistics,
     pub timeline: Vec<TicketTimelinePoint>,
+    #[serde(rename = "final")]
+    pub final_tickets: FinalTickets,
+}
+
+/// Final ticket counts at end of match
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct FinalTickets {
+    pub team1: i32,
+    pub team2: i32,
 }
 
 /// Match metadata
@@ -426,6 +435,7 @@ pub fn build_ticketproof(
         }).collect(),
         events,
         statistics: stats,
+        final_tickets: FinalTickets { team1: t1, team2: t2 },
         timeline,
     }
 }
