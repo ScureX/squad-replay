@@ -1,7 +1,7 @@
 use clap::{Parser, Subcommand};
 use serde::Serialize;
 use squadreplay::bundle::Bundle;
-use squadreplay::{Error, ParseOptions, Result, compat, parse_file, read_bundle, sqrb, sqrj, timeline};
+use squadreplay::{Error, ParseOptions, Result, compat, parse_file, read_bundle, sqrb, sqrj, ticketproof, timeline};
 use std::fs::{self, File};
 use std::io::{BufWriter, Write};
 use std::path::{Path, PathBuf};
@@ -141,6 +141,7 @@ enum Command {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum OutputFormat {
     Sqrt,
+    Sqrp,
     Sqrj,
     Sqrb,
 }
@@ -148,6 +149,7 @@ enum OutputFormat {
 #[derive(Debug, Clone, Default)]
 struct OutputSelection {
     sqrt: bool,
+    sqrp: bool,
     sqrj: bool,
     sqrb: bool,
 }
@@ -159,12 +161,13 @@ impl OutputSelection {
             match part.as_str() {
                 "" => {}
                 "sqrt" => out.sqrt = true,
+                "sqrp" => out.sqrp = true,
                 "sqrj" => out.sqrj = true,
                 "sqrb" => out.sqrb = true,
                 other => return Err(format!("unsupported format `{other}`")),
             }
         }
-        if !out.sqrt && !out.sqrj && !out.sqrb {
+        if !out.sqrt && !out.sqrp && !out.sqrj && !out.sqrb {
             return Err("at least one format must be selected".to_string());
         }
         Ok(out)
@@ -174,6 +177,9 @@ impl OutputSelection {
         let mut formats = Vec::new();
         if self.sqrt {
             formats.push(OutputFormat::Sqrt);
+        }
+        if self.sqrp {
+            formats.push(OutputFormat::Sqrp);
         }
         if self.sqrj {
             formats.push(OutputFormat::Sqrj);
@@ -188,6 +194,7 @@ impl OutputSelection {
 #[derive(Debug, Clone, Default)]
 struct WrittenOutputs {
     sqrt: Option<PathBuf>,
+    sqrp: Option<PathBuf>,
     sqrj: Option<PathBuf>,
     sqrb: Option<PathBuf>,
     compat_json: Option<PathBuf>,
@@ -241,6 +248,7 @@ fn path_text(path: &Path) -> String {
 fn written_outputs_json(written: &WrittenOutputs) -> serde_json::Value {
     serde_json::json!({
         "sqrt": written.sqrt.as_deref().map(path_text),
+        "sqrp": written.sqrp.as_deref().map(path_text),
         "sqrj": written.sqrj.as_deref().map(path_text),
         "sqrb": written.sqrb.as_deref().map(path_text),
         "compat_json": written.compat_json.as_deref().map(path_text),
@@ -272,6 +280,12 @@ fn write_outputs(
                 let tl = timeline::build_timeline(bundle, None, &timeline::TimelineOptions::default());
                 timeline::write_timeline(&tl, &path)?;
                 written.sqrt = Some(path);
+            }
+            OutputFormat::Sqrp => {
+                let path = output_path_with_suffix(output_base, ".sqrp.json");
+                let tp = ticketproof::build_ticketproof(bundle, None, &ticketproof::TicketProofOptions::default());
+                ticketproof::write_ticketproof(&tp, &path)?;
+                written.sqrp = Some(path);
             }
             OutputFormat::Sqrj => {
                 let path = output_path_with_suffix(output_base, ".sqrj.json");
@@ -585,6 +599,7 @@ mod tests {
                 vehicle_states: vec![VehicleStateEvent::default(); 7],
                 weapon_states: vec![WeaponStateEvent::default(); 4],
                 capture_zones: vec![],
+                vehicle_deaths: vec![],
                 properties: vec![Default::default(); 125],
             },
             diagnostics: Diagnostics {

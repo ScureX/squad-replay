@@ -57,6 +57,15 @@ pub enum LogEventType {
         victim: String,
         victim_ids: String,
     },
+    VehicleDied {
+        vehicle_class: String,
+        vehicle_id: String,
+        causer: String,
+        instigator: Option<String>,
+    },
+    DemoStarted {
+        filename: String,
+    },
     RoundEnd,
 }
 
@@ -67,6 +76,7 @@ pub struct LogMatch {
     pub layer: String,
     pub start_time: chrono::NaiveDateTime,
     pub end_time: Option<chrono::NaiveDateTime>,
+    pub replay_filename: Option<String>,
     pub events: Vec<LogEvent>,
 }
 
@@ -208,6 +218,18 @@ pub fn parse_log_file(path: &Path) -> Result<Vec<LogMatch>, std::io::Error> {
         r"^\[([0-9.:-]+)\]\[([ 0-9]*)\]LogSquad: (.+) \(Online IDs:([^)]+)\) has revived (.+) \(Online IDs:([^)]+)\)\."
     ).unwrap();
     
+    // Vehicle damage with health remaining <= 0 means destroyed
+    // Example: BP_BRDM-2L1_AFU_C_2144717068: 40.00 damage taken by causer LAV_M252_AP_C_2144723201 instigator (Online Ids: Marlonc3d) EOS: ... health remaining -10.00
+    let re_vehicle_damage = Regex::new(
+        r"^\[([0-9.:-]+)\]\[([ 0-9]*)\]LogSquadTrace: \[DedicatedServer\](?:TraceAndMessageClient|TakeDamage)\(\): (BP_[A-Za-z0-9_-]+)_C_(\d+): [-0-9.]+ damage taken by causer ([A-Za-z0-9_-]+)_C(?:_\d+)?(?: instigator \(Online Ids: ([^)]+)\))?.* health remaining (-?[0-9.]+)"
+    ).unwrap();
+    
+    // Demo recording started - contains replay filename
+    // Example: LogSquad: ADMIN COMMAND: Demo started recording to file: FULLTEST from player 100.
+    let re_demo_started = Regex::new(
+        r"^\[([0-9.:-]+)\]\[([ 0-9]*)\]LogSquad: ADMIN COMMAND: Demo started recording to file: ([^ ]+) from player"
+    ).unwrap();
+    
     let re_round_end = Regex::new(
         r"^\[([0-9.:-]+)\]\[([ 0-9]*)\]LogGameState: Match State Changed from InProgress to WaitingPostMatch"
     ).unwrap();
@@ -257,6 +279,7 @@ pub fn parse_log_file(path: &Path) -> Result<Vec<LogMatch>, std::io::Error> {
                 layer,
                 start_time: timestamp,
                 end_time: None,
+                replay_filename: None,
                 events: Vec::new(),
             });
             continue;
@@ -378,6 +401,40 @@ pub fn parse_log_file(path: &Path) -> Result<Vec<LogMatch>, std::io::Error> {
             continue;
         }
         
+        // Vehicle destroyed (health remaining <= 0)
+        if let Some(caps) = re_vehicle_damage.captures(&line) {
+            if let Some(timestamp) = parse_timestamp(&caps[1]) {
+                let health_remaining: f64 = caps[7].parse().unwrap_or(1.0);
+                if health_remaining <= 0.0 {
+                    let t_ms = ((timestamp - current.start_time).num_milliseconds().max(0)) as u64;
+                    current.events.push(LogEvent {
+                        t_ms,
+                        event_type: LogEventType::VehicleDied {
+                            vehicle_class: caps[3].to_string(),
+                            vehicle_id: caps[4].to_string(),
+                            causer: caps[5].to_string(),
+                            instigator: caps.get(6).map(|m| m.as_str().to_string()),
+                        },
+                    });
+                }
+            }
+            continue;
+        }
+        
+        // Demo started recording (capture replay filename)
+        if let Some(caps) = re_demo_started.captures(&line) {
+            let filename = caps[3].to_string();
+            current.replay_filename = Some(filename.clone());
+            if let Some(timestamp) = parse_timestamp(&caps[1]) {
+                let t_ms = ((timestamp - current.start_time).num_milliseconds().max(0)) as u64;
+                current.events.push(LogEvent {
+                    t_ms,
+                    event_type: LogEventType::DemoStarted { filename },
+                });
+            }
+            continue;
+        }
+        
         // Round end
         if let Some(caps) = re_round_end.captures(&line) {
             if let Some(timestamp) = parse_timestamp(&caps[1]) {
@@ -400,8 +457,9 @@ pub fn parse_log_file(path: &Path) -> Result<Vec<LogMatch>, std::io::Error> {
     Ok(matches)
 }
 
-/// Find the best matching log match for a replay by comparing times.
-/// The replay file's modification time should be close to when the match ended.
+/// Find the best matching log match for a replay.
+/// First tries to match by replay filename (from "Demo started recording" log entry).
+/// Falls back to matching by time if filename not found.
 /// tz_offset_hours adjusts log timestamps (e.g., 2 if server is UTC and local is UTC+2).
 pub fn find_matching_log<'a>(
     log_matches: &'a [LogMatch],
@@ -409,7 +467,37 @@ pub fn find_matching_log<'a>(
     replay_end_time: Option<chrono::NaiveDateTime>,
     tz_offset_hours: i32,
 ) -> Option<&'a LogMatch> {
+    find_matching_log_by_name(log_matches, replay_duration_ms, replay_end_time, tz_offset_hours, None)
+}
+
+/// Find the best matching log match for a replay, optionally by filename.
+/// If replay_name is provided, tries to match by filename first.
+pub fn find_matching_log_by_name<'a>(
+    log_matches: &'a [LogMatch],
+    replay_duration_ms: u64,
+    replay_end_time: Option<chrono::NaiveDateTime>,
+    tz_offset_hours: i32,
+    replay_name: Option<&str>,
+) -> Option<&'a LogMatch> {
     println!("[log] Searching {} matches in log", log_matches.len());
+    
+    // First, try to match by replay filename if provided
+    if let Some(name) = replay_name {
+        // Strip .replay extension if present
+        let base_name = name.trim_end_matches(".replay");
+        println!("[log] Looking for replay filename: {}", base_name);
+        
+        for log_match in log_matches {
+            if let Some(ref log_replay_name) = log_match.replay_filename {
+                if log_replay_name.eq_ignore_ascii_case(base_name) {
+                    println!("[log] Match found by filename: {} - {} ({} events)", 
+                        log_match.map, log_match.layer, log_match.events.len());
+                    return Some(log_match);
+                }
+            }
+        }
+        println!("[log] No filename match found, falling back to time-based matching");
+    }
     
     if let Some(replay_end) = replay_end_time {
         println!("[log] Replay file time: {}", replay_end.format("%Y-%m-%d %H:%M:%S"));

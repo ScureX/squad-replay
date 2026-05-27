@@ -5912,6 +5912,7 @@ fn parse_data(
             vehicle_states: state.vehicle_state_events,
             weapon_states: state.weapon_state_events,
             capture_zones,
+            vehicle_deaths: vec![],
             properties: state.property_events,
         },
         diagnostics: Diagnostics {

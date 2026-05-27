@@ -395,6 +395,17 @@ pub struct CaptureZone {
     pub events: Vec<CaptureZoneEvent>,
 }
 
+/// A vehicle death event (from log parsing).
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct VehicleDeathEvent {
+    pub t_ms: u64,
+    pub second: u32,
+    pub vehicle_class: String,
+    pub vehicle_id: String,
+    pub causer: String,
+    pub instigator: Option<String>,
+}
+
 /// All classified game events extracted from the replay.
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct EventGroups {
@@ -405,6 +416,7 @@ pub struct EventGroups {
     pub vehicle_states: Vec<VehicleStateEvent>,
     pub weapon_states: Vec<WeaponStateEvent>,
     pub capture_zones: Vec<CaptureZone>,
+    pub vehicle_deaths: Vec<VehicleDeathEvent>,
     pub properties: Vec<PropertyEvent>,
 }
 

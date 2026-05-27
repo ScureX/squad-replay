@@ -71,6 +71,8 @@ mod parser;
 pub mod sqrb;
 /// Read and write `.sqrj.json` (human-readable JSON) bundles.
 pub mod sqrj;
+/// Ticket proof format for match analysis.
+pub mod ticketproof;
 /// Timeline format for Squad Replay Viewer (`.sqrt.json`).
 pub mod timeline;
 mod unreal_names;
@@ -89,6 +91,11 @@ pub fn parse_file(path: impl AsRef<Path>, options: &ParseOptions) -> Result<Bund
             if let Ok(log_matches) = log_parser::parse_log_file(log_path) {
                 let replay_duration = bundle.replay.duration_ms;
                 
+                // Get replay filename for matching (without extension)
+                let replay_name = path.file_stem()
+                    .and_then(|s| s.to_str())
+                    .map(|s| s.trim_end_matches(".replay"));
+                
                 // Get replay file modification time for matching (in local time to match log timestamps)
                 let replay_end_time = std::fs::metadata(path)
                     .and_then(|m| m.modified())
@@ -98,8 +105,9 @@ pub fn parse_file(path: impl AsRef<Path>, options: &ParseOptions) -> Result<Bund
                         datetime.naive_local()
                     });
                 
-                if let Some(log_match) = log_parser::find_matching_log(&log_matches, replay_duration, replay_end_time, options.tz_offset_hours) {
+                if let Some(log_match) = log_parser::find_matching_log_by_name(&log_matches, replay_duration, replay_end_time, options.tz_offset_hours, replay_name) {
                     log_parser::merge_log_into_players(&mut bundle.players, log_match, replay_duration);
+                    merge_vehicle_deaths(&mut bundle.events.vehicle_deaths, log_match);
                 }
             }
         }
@@ -108,13 +116,29 @@ pub fn parse_file(path: impl AsRef<Path>, options: &ParseOptions) -> Result<Bund
     Ok(bundle)
 }
 
+/// Merge vehicle death events from log into bundle.
+fn merge_vehicle_deaths(vehicle_deaths: &mut Vec<bundle::VehicleDeathEvent>, log_match: &log_parser::LogMatch) {
+    for event in &log_match.events {
+        if let log_parser::LogEventType::VehicleDied { vehicle_class, vehicle_id, causer, instigator } = &event.event_type {
+            vehicle_deaths.push(bundle::VehicleDeathEvent {
+                t_ms: event.t_ms,
+                second: (event.t_ms / 1000) as u32,
+                vehicle_class: vehicle_class.clone(),
+                vehicle_id: vehicle_id.clone(),
+                causer: causer.clone(),
+                instigator: instigator.clone(),
+            });
+        }
+    }
+}
+
 /// Parse replay bytes that are already loaded in memory.
 pub fn parse_bytes(
     bytes: impl AsRef<[u8]>,
     file_name: Option<String>,
     options: &ParseOptions,
 ) -> Result<Bundle> {
-    let mut bundle = parser::parse_bytes(bytes.as_ref(), file_name, options.include_property_events)?;
+    let mut bundle = parser::parse_bytes(bytes.as_ref(), file_name.clone(), options.include_property_events)?;
     
     // Merge log data if provided
     if let Some(log_path) = &options.log_path {
@@ -122,9 +146,13 @@ pub fn parse_bytes(
             if let Ok(log_matches) = log_parser::parse_log_file(log_path) {
                 let replay_duration = bundle.replay.duration_ms;
                 
+                // Get replay name from file_name if provided
+                let replay_name = file_name.as_ref().map(|s| s.trim_end_matches(".replay"));
+                
                 // No file to get modification time from - will use duration fallback
-                if let Some(log_match) = log_parser::find_matching_log(&log_matches, replay_duration, None, options.tz_offset_hours) {
+                if let Some(log_match) = log_parser::find_matching_log_by_name(&log_matches, replay_duration, None, options.tz_offset_hours, replay_name) {
                     log_parser::merge_log_into_players(&mut bundle.players, log_match, replay_duration);
+                    merge_vehicle_deaths(&mut bundle.events.vehicle_deaths, log_match);
                 }
             }
         }
