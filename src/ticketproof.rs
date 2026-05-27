@@ -28,10 +28,21 @@ pub struct TicketProof {
     pub meta: TicketMeta,
     pub teams: Vec<TicketTeam>,
     pub events: Vec<TicketEvent>,
+    pub counts: TicketCounts,
     pub statistics: TicketStatistics,
     pub timeline: Vec<TicketTimelinePoint>,
     #[serde(rename = "final")]
     pub final_tickets: FinalTickets,
+}
+
+/// Event counts
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct TicketCounts {
+    pub events_total: usize,
+    pub infantry_deaths: usize,
+    pub vehicle_deaths: usize,
+    pub captures: usize,
+    pub radio_bleeds: usize,
 }
 
 /// Final ticket counts at end of match
@@ -49,6 +60,14 @@ pub struct TicketMeta {
     pub mode: Option<String>,
     pub duration_ms: u64,
     pub start_tickets: StartTickets,
+    pub teams: MetaTeams,
+}
+
+/// Team names for display
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct MetaTeams {
+    pub team1: String,
+    pub team2: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -416,6 +435,22 @@ pub fn build_ticketproof(
         });
     }
     
+    // Build counts
+    let infantry_deaths = events.iter().filter(|e| e.kind == "infantry_death").count();
+    let vehicle_deaths = events.iter().filter(|e| e.kind == "vehicle_death").count();
+    let captures = events.iter().filter(|e| e.kind.starts_with("capture_")).count();
+    let radio_bleeds = events.iter().filter(|e| e.kind == "radio_bleed").count();
+    
+    // Extract team names from bundle.teams
+    let team1_name = bundle.teams.iter()
+        .find(|t| normalize_team_id(t.id, &team_map) == 1)
+        .and_then(|t| t.faction.clone())
+        .unwrap_or_else(|| "Team 1".to_string());
+    let team2_name = bundle.teams.iter()
+        .find(|t| normalize_team_id(t.id, &team_map) == 2)
+        .and_then(|t| t.faction.clone())
+        .unwrap_or_else(|| "Team 2".to_string());
+    
     TicketProof {
         version: TICKETPROOF_VERSION,
         meta: TicketMeta {
@@ -427,12 +462,23 @@ pub fn build_ticketproof(
                 team1: start_t1,
                 team2: start_t2,
             },
+            teams: MetaTeams {
+                team1: team1_name,
+                team2: team2_name,
+            },
         },
         teams: bundle.teams.iter().map(|t| TicketTeam {
             id: normalize_team_id(t.id, &team_map),
             faction: t.faction.clone(),
             name: t.name.clone(),
         }).collect(),
+        counts: TicketCounts {
+            events_total: events.len(),
+            infantry_deaths,
+            vehicle_deaths,
+            captures,
+            radio_bleeds,
+        },
         events,
         statistics: stats,
         final_tickets: FinalTickets { team1: t1, team2: t2 },
